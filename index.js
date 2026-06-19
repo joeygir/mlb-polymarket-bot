@@ -1,3 +1,4 @@
+require('dotenv').config();
 const axios = require('axios');
 
 const STADIUMS = {
@@ -314,10 +315,46 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   return { lean, signals };
 }
 
+async function getOdds() {
+  try {
+    const res = await axios.get('https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/', {
+      params: {
+        apiKey: process.env.ODDS_API_KEY,
+        regions: 'us',
+        markets: 'totals',
+        oddsFormat: 'american',
+        dateFormat: 'iso',
+      },
+    });
+    const oddsMap = {};
+    for (const game of res.data) {
+      const key = `${game.away_team}|${game.home_team}`;
+      const lines = [];
+      for (const book of game.bookmakers) {
+        const market = book.markets.find(m => m.key === 'totals');
+        if (!market) continue;
+        const over = market.outcomes.find(o => o.name === 'Over');
+        const under = market.outcomes.find(o => o.name === 'Under');
+        if (over && under) lines.push({ book: book.title, point: over.point, overPrice: over.price, underPrice: under.price });
+      }
+      if (lines.length > 0) {
+        const avgTotal = lines.reduce((a, b) => a + b.point, 0) / lines.length;
+        const avgOver = lines.reduce((a, b) => a + b.overPrice, 0) / lines.length;
+        const avgUnder = lines.reduce((a, b) => a + b.underPrice, 0) / lines.length;
+        const fmt = p => p > 0 ? `+${Math.round(p)}` : `${Math.round(p)}`;
+        oddsMap[key] = `O/U ${avgTotal.toFixed(1)} | Over ${fmt(avgOver)} / Under ${fmt(avgUnder)} (avg of ${lines.length} books)`;
+      }
+    }
+    return oddsMap;
+  } catch {
+    return {};
+  }
+}
+
 async function getTodayGames() {
   const today = new Date().toISOString().split('T')[0];
   const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team`;
-  const response = await axios.get(url);
+  const [response, oddsMap] = await Promise.all([axios.get(url), getOdds()]);
   const games = response.data.dates[0]?.games || [];
 
   console.log(`\n============================`);
@@ -353,6 +390,9 @@ async function getTodayGames() {
       return `${name} — ERA: ${stats.era.toFixed(2)}, K/9: ${stats.strikeoutsPer9Inn.toFixed(1)}, BB/9: ${stats.walksPer9Inn.toFixed(1)}, ${type}`;
     };
 
+    const oddsKey = `${away}|${home}`;
+    const oddsLine = oddsMap[oddsKey] || 'No odds available';
+
     console.log(`${away} @ ${home}`);
     console.log(`  ${venue}`);
     console.log(`  Away: ${fmtPitcher(awayPitcher, awayStats)}`);
@@ -360,6 +400,7 @@ async function getTodayGames() {
     if (weather && !analysis.lean.startsWith('DOME')) {
       console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
     }
+    console.log(`  Line: ${oddsLine}`);
     console.log(`  Lean: ${analysis.lean}`);
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
