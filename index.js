@@ -71,6 +71,38 @@ async function getPitcherStats(pitcherName) {
   }
 }
 
+async function getTeamHitters(teamId) {
+  try {
+    const roster = await axios.get(
+      `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active`
+    );
+    const batters = roster.data.roster.filter(p => p.position.code !== '1');
+    const statsPromises = batters.slice(0, 9).map(async (player) => {
+      try {
+        const res = await axios.get(
+          `https://statsapi.mlb.com/api/v1/people/${player.person.id}/stats?stats=lastXGames&season=2026&group=hitting&limit=15`
+        );
+        const stat = res.data.stats?.[0]?.splits?.[0]?.stat;
+        if (!stat || !stat.atBats || stat.atBats < 10) return null;
+        return {
+          name: player.person.fullName,
+          ops: parseFloat(stat.ops || 0),
+          avg: stat.avg,
+          atBats: stat.atBats,
+        };
+      } catch {
+        return null;
+      }
+    });
+
+    const results = (await Promise.all(statsPromises)).filter(Boolean);
+    results.sort((a, b) => b.ops - a.ops);
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 async function getWeather(lat, lon) {
   try {
     const pointRes = await axios.get(`https://api.weather.gov/points/${lat},${lon}`);
@@ -97,7 +129,6 @@ function scorePitchers(awayStats, homeStats, windIsOut, venue) {
   const signals = [];
   let overScore = 0;
   let underScore = 0;
-
   const isCoors = venue === 'Coors Field';
 
   for (const [side, stats] of [['Away', awayStats], ['Home', homeStats]]) {
@@ -110,7 +141,6 @@ function scorePitchers(awayStats, homeStats, windIsOut, venue) {
     const isHittable = stats.era > 5.00;
     const isHighK = stats.strikeoutsPer9Inn > 10.0;
 
-    // ERA scoring
     if (isElite) {
       signals.push(`${side} pitcher ERA ${stats.era.toFixed(2)} — elite, suppresses scoring`);
       underScore += 2;
@@ -122,26 +152,21 @@ function scorePitchers(awayStats, homeStats, windIsOut, venue) {
       overScore += 1;
     }
 
-    // GB/FB + wind interaction
     if (isFlyBall && windIsOut) {
-      signals.push(`${side} pitcher is fly ball type (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) + wind out — amplified OVER signal`);
+      signals.push(`${side} fly ball pitcher (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) + wind out — amplified OVER`);
       overScore += 2;
-    } else if (isFlyBall && !windIsOut) {
-      signals.push(`${side} pitcher is fly ball type (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) — neutral without wind`);
     } else if (isGroundBall && windIsOut) {
-      signals.push(`${side} pitcher is ground ball type (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) — wind out effect reduced`);
+      signals.push(`${side} ground ball pitcher (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) — wind out effect reduced`);
       overScore -= 1;
     }
 
-    // Coors adjustment
     if (isCoors && isFlyBall) {
       signals.push(`${side} fly ball pitcher at Coors — extreme OVER amplifier`);
       overScore += 2;
     }
 
-    // High K rate caps scoring
     if (isHighK) {
-      signals.push(`${side} pitcher K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high strikeout rate caps offense`);
+      signals.push(`${side} K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high strikeout rate caps offense`);
       underScore += 1;
     }
   }
@@ -149,29 +174,66 @@ function scorePitchers(awayStats, homeStats, windIsOut, venue) {
   return { overScore, underScore, signals };
 }
 
-function analyzeGame(weather, venue, awayStats, homeStats) {
+function scoreLineup(hitters, label) {
+  const signals = [];
+  let overScore = 0;
+  let underScore = 0;
+
+  if (!hitters || hitters.length === 0) return { overScore, underScore, signals };
+
+  const avgOps = hitters.reduce((a, b) => a + b.ops, 0) / hitters.length;
+  const hotHitters = hitters.filter(h => h.ops > 0.800);
+  const coldHitters = hitters.filter(h => h.ops < 0.650);
+
+  if (avgOps > 0.780) {
+    signals.push(`${label} lineup hot (avg OPS ${avgOps.toFixed(3)} last 15 games)`);
+    overScore += 1;
+  } else if (avgOps < 0.660) {
+    signals.push(`${label} lineup cold (avg OPS ${avgOps.toFixed(3)} last 15 games)`);
+    underScore += 1;
+  }
+
+  if (hotHitters.length >= 3) {
+    signals.push(`${label} has ${hotHitters.length} hot hitters (OPS > .800): ${hotHitters.slice(0,3).map(h => h.name.split(' ')[1]).join(', ')}`);
+    overScore += 1;
+  }
+
+  if (coldHitters.length >= 3) {
+    signals.push(`${label} has ${coldHitters.length} cold hitters (OPS < .650): ${coldHitters.slice(0,3).map(h => h.name.split(' ')[1]).join(', ')}`);
+    underScore += 1;
+  }
+
+  return { overScore, underScore, signals };
+}
+
+function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters) {
   const stadium = STADIUMS[venue];
   if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [] };
 
   if (!stadium.outDirs) {
-    const pitcherSignals = [];
+    const signals = ['Weather irrelevant — dome'];
     let overScore = 0;
     let underScore = 0;
 
     for (const [side, stats] of [['Away', awayStats], ['Home', homeStats]]) {
       if (!stats) continue;
-      if (stats.era < 2.50) { pitcherSignals.push(`${side} ERA ${stats.era.toFixed(2)} — elite`); underScore += 2; }
-      else if (stats.era < 3.50) { pitcherSignals.push(`${side} ERA ${stats.era.toFixed(2)} — solid`); underScore += 1; }
-      else if (stats.era > 5.00) { pitcherSignals.push(`${side} ERA ${stats.era.toFixed(2)} — hittable`); overScore += 1; }
-      if (stats.strikeoutsPer9Inn > 10.0) { pitcherSignals.push(`${side} K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high K rate`); underScore += 1; }
+      if (stats.era < 2.50) { signals.push(`${side} ERA ${stats.era.toFixed(2)} — elite`); underScore += 2; }
+      else if (stats.era < 3.50) { signals.push(`${side} ERA ${stats.era.toFixed(2)} — solid`); underScore += 1; }
+      else if (stats.era > 5.00) { signals.push(`${side} ERA ${stats.era.toFixed(2)} — hittable`); overScore += 1; }
+      if (stats.strikeoutsPer9Inn > 10.0) { signals.push(`${side} K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high K`); underScore += 1; }
     }
+
+    const awayLineup = scoreLineup(awayHitters, 'Away');
+    const homeLineup = scoreLineup(homeHitters, 'Home');
+    overScore += awayLineup.overScore + homeLineup.overScore;
+    underScore += awayLineup.underScore + homeLineup.underScore;
+    signals.push(...awayLineup.signals, ...homeLineup.signals);
 
     const score = overScore - underScore;
     let lean = 'DOME — NEUTRAL';
-    if (score >= 2) lean = 'DOME — LEAN OVER (pitchers hittable)';
-    else if (score <= -2) lean = 'DOME — LEAN UNDER (pitchers dominant)';
-
-    return { lean, signals: ['Weather irrelevant', ...pitcherSignals] };
+    if (score >= 2) lean = 'DOME — LEAN OVER';
+    else if (score <= -2) lean = 'DOME — LEAN UNDER';
+    return { lean, signals };
   }
 
   if (!weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'] };
@@ -181,7 +243,6 @@ function analyzeGame(weather, venue, awayStats, homeStats) {
   let overScore = 0;
   let underScore = 0;
 
-  // Wind analysis
   const isOut = stadium.outDirs.includes(windDir);
   const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
   const isIn = !isOut && !isCross;
@@ -204,7 +265,6 @@ function analyzeGame(weather, venue, awayStats, homeStats) {
     signals.push(`Calm wind at ${maxWind}mph — no wind edge`);
   }
 
-  // Temperature analysis
   if (avgTemp >= 90) {
     signals.push(`Very hot (${avgTemp}F) — ball carries significantly`);
     overScore += 2;
@@ -221,21 +281,24 @@ function analyzeGame(weather, venue, awayStats, homeStats) {
     signals.push(`Neutral temp (${avgTemp}F)`);
   }
 
-  // Rain check
   const rainKeywords = ['rain', 'shower', 'storm', 'thunderstorm', 'drizzle'];
   if (rainKeywords.some(k => condition.toLowerCase().includes(k))) {
     signals.push(`${condition} — postponement risk, avoid or wait`);
     return { lean: 'AVOID', signals };
   }
 
-  // Pitcher scoring
   const windIsOut = isOut && maxWind >= 10;
   const pitcherResult = scorePitchers(awayStats, homeStats, windIsOut, venue);
   overScore += pitcherResult.overScore;
   underScore += pitcherResult.underScore;
   signals.push(...pitcherResult.signals);
 
-  // Final lean
+  const awayLineup = scoreLineup(awayHitters, 'Away');
+  const homeLineup = scoreLineup(homeHitters, 'Home');
+  overScore += awayLineup.overScore + homeLineup.overScore;
+  underScore += awayLineup.underScore + homeLineup.underScore;
+  signals.push(...awayLineup.signals, ...homeLineup.signals);
+
   const score = overScore - underScore;
   let lean;
   if (score >= 4) lean = 'STRONG OVER';
@@ -253,7 +316,7 @@ function analyzeGame(weather, venue, awayStats, homeStats) {
 
 async function getTodayGames() {
   const today = new Date().toISOString().split('T')[0];
-  const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue`;
+  const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team`;
   const response = await axios.get(url);
   const games = response.data.dates[0]?.games || [];
 
@@ -264,6 +327,8 @@ async function getTodayGames() {
   for (const game of games) {
     const home = game.teams.home.team.name;
     const away = game.teams.away.team.name;
+    const homeId = game.teams.home.team.id;
+    const awayId = game.teams.away.team.id;
     const venue = game.venue.name;
     const homePitcher = game.teams.home.probablePitcher?.fullName || 'TBD';
     const awayPitcher = game.teams.away.probablePitcher?.fullName || 'TBD';
@@ -273,12 +338,14 @@ async function getTodayGames() {
       ? await getWeather(coords.lat, coords.lon)
       : null;
 
-    const [awayStats, homeStats] = await Promise.all([
+    const [awayStats, homeStats, awayHitters, homeHitters] = await Promise.all([
       getPitcherStats(awayPitcher),
       getPitcherStats(homePitcher),
+      getTeamHitters(awayId),
+      getTeamHitters(homeId),
     ]);
 
-    const analysis = analyzeGame(weather, venue, awayStats, homeStats);
+    const analysis = analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters);
 
     const fmtPitcher = (name, stats) => {
       if (!stats) return `${name} (no stats)`;
