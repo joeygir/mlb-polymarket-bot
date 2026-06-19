@@ -1,0 +1,95 @@
+
+============================
+MLB OVER/UNDER BOT — 2026-06-19
+============================
+
+Toronto Blue Jays @ Chicago Cubs
+Venue: Wrigley Field
+Pitchers: Kevin Gausman vs Ben Brown
+Weather: Sunny, 70°F, Wind 10mph ESE
+Lean: NEUTRAL
+  → Moderate wind at 10mph from ESE — mild effect
+---
+Chicago White Sox @ Detroit Tigers
+Venue: Comerica Park
+Pitchers: Brandon Eisert vs Tarik Skubal
+Weather: Mostly Sunny, 72°F, Wind 14mph WNW
+Lean: NEUTRAL
+  → Moderate wind at 14mph from WNW — mild effect
+---
+Cincinnati Reds @ New York Yankees
+Venue: Yankee Stadium
+Pitchers: Rhett Lowder vs Cam Schlittler
+Weather: Partly Sunny, 80°F, Wind 15mph W
+Lean: NEUTRAL
+  → Moderate wind at 15mph from W — mild effect
+---
+Washington Nationals @ Tampa Bay Rays
+Venue: Tropicana Field
+Pitchers: PJ Poulin vs Griffin Jax
+Weather: Chance Showers And Thunderstorms, 87°F, Wind 9mph W
+Analysis: DOME — weather irrelevant. Use pitcher matchup only.
+---
+San Francisco Giants @ Miami Marlins
+Venue: loanDepot park
+Pitchers: Landen Roupp vs Lake Bachar
+Weather: Sunny, 86°F, Wind 9mph S
+Lean: OVER
+  → Hot (86°F) — ball carries further, slight OVER lean
+---
+Milwaukee Brewers @ Atlanta Braves
+Venue: Truist Park
+Pitchers: Jacob Misiorowski vs Martín Pérez
+Weather: Mostly Sunny, 81°F, Wind 10mph NW
+Lean: NEUTRAL
+  → Moderate wind at 10mph from NW — mild effect
+---
+San Diego Padres @ Texas Rangers
+Venue: Globe Life Field
+Pitchers: Randy Vásquez vs Jacob deGrom
+Weather: Slight Chance Showers And Thunderstorms, 79°F, Wind 10mph E
+Analysis: DOME — weather irrelevant. Use pitcher matchup only.
+---
+Cleveland Guardians @ Houston Astros
+Venue: Daikin Park
+Pitchers: Tanner Bibee vs Tatsuya Imai
+Analysis: No weather data available
+---
+St. Louis Cardinals @ Kansas City Royals
+Venue: Kauffman Stadium
+Pitchers: Michael McGreevy vs Seth Lugo
+Weather: Partly Sunny, 83°F, Wind 6mph SSE
+Lean: NEUTRAL
+---
+Pittsburgh Pirates @ Colorado Rockies
+Venue: Coors Field
+Pitchers: Bubba Chandler vs Kyle Freeland
+Weather: Sunny, 81°F, Wind 7mph ENE
+Lean: NEUTRAL
+---
+Los Angeles Angels @ Athletics
+Venue: Sutter Health Park
+Pitchers: José Soriano vs Jeffrey Springs
+Weather: Sunny, 79°F, Wind 10mph SW
+Lean: NEUTRAL
+  → Moderate wind at 10mph from SW — mild effect
+---
+Minnesota Twins @ Arizona Diamondbacks
+Venue: Chase Field
+Pitchers: Connor Prielipp vs Michael Soroka
+Weather: Sunny, 104°F, Wind 10mph SSW
+Analysis: DOME — weather irrelevant. Use pitcher matchup only.
+---
+Baltimore Orioles @ Los Angeles Dodgers
+Venue: UNIQLO Field at Dodger Stadium
+Pitchers: Trey Gibson vs Roki Sasaki
+Weather: Partly Sunny, 72°F, Wind 10mph SW
+Lean: NEUTRAL
+  → Moderate wind at 10mph from SW — mild effect
+---
+Boston Red Sox @ Seattle Mariners
+Venue: T-Mobile Park
+Pitchers: Ranger Suarez vs Bryce Miller
+Weather: Mostly Sunny, 79°F, Wind 7mph NW
+Lean: NEUTRAL
+---
