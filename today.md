@@ -1,212 +1,222 @@
-◇ injected env (1) from .env // tip: ⌘ suppress logs { quiet: true }
+◇ injected env (1) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
 
 ============================
- MLB OVER/UNDER BOT — 2026-06-19
+ MLB OVER/UNDER BOT — 2026-06-20
 ============================
 
-Toronto Blue Jays @ Chicago Cubs
-  Wrigley Field
-  Away: Kevin Gausman — ERA: 4.04, K/9: 9.0, BB/9: 2.0, FB
-  Home: Ben Brown — ERA: 1.85, K/9: 8.6, BB/9: 2.5, Neutral
-  Mostly Sunny, 70F, Wind 10mph SE
-  Line: O/U 9.0 | Over -115 / Under -105 (avg of 7 books)
-  Lean: NEUTRAL
-   -> Wind OUT at 10mph SE — mild carry boost
-   -> Neutral temp (70F)
-   -> Away fly ball pitcher (GO/AO 0.86) + wind out — amplified OVER
-   -> Home pitcher ERA 1.85 — elite, suppresses scoring
-   -> Away has 3 hot hitters (OPS > .800): Valenzuela, Springer, Schneider
-   -> Home lineup cold (avg OPS 0.657 last 15 games)
-   -> Home has 3 cold hitters (OPS < .650): Shaw, Swanson, Conforto
----
 Chicago White Sox @ Detroit Tigers
   Comerica Park
-  Away: Brandon Eisert — ERA: 5.50, K/9: 10.5, BB/9: 3.0, FB
-  Home: Tarik Skubal — ERA: 2.88, K/9: 9.4, BB/9: 1.3, GB
-  Partly Cloudy, 70F, Wind 14mph WNW
-  Line: O/U 9.1 | Over -49 / Under -86 (avg of 6 books)
+  Away: TBD (no stats)
+  Home: Troy Melton — ERA: 2.81, K/9: 4.9, BB/9: 2.1, Neutral
+  Partly Cloudy, 64F, Wind 9mph WNW
+  Line: No odds available
   Lean: UNDER
-   -> Crosswind at 14mph WNW — minimal scoring effect
-   -> Neutral temp (70F)
-   -> Away pitcher ERA 5.50 — hittable, over lean
-   -> Away K/9 10.5 — high strikeout rate caps offense
-   -> Home pitcher ERA 2.88 — solid, mild under lean
-   -> Away has 4 cold hitters (OPS < .650): Quero, Montgomery, Gonzalez
-   -> Home lineup cold (avg OPS 0.652 last 15 games)
+   -> Calm wind at 9mph — no wind edge
+   -> Neutral temp (64F)
+   -> Home pitcher ERA 2.81 — solid, mild under lean
+   -> Away has 4 cold hitters (OPS < .650): Gonzalez, Montgomery, Quero
+   -> Home lineup cold (avg OPS 0.649 last 15 games)
    -> Home has 3 hot hitters (OPS > .800): Dingler, Carpenter, McGonigle
-   -> Home has 4 cold hitters (OPS < .650): Rogers, Vierling, Outman
+   -> Home has 4 cold hitters (OPS < .650): Rogers, Vierling, Jones
 ---
 Cincinnati Reds @ New York Yankees
   Yankee Stadium
-  Away: Rhett Lowder — ERA: 4.56, K/9: 7.0, BB/9: 4.8, Neutral
-  Home: Cam Schlittler — ERA: 1.80, K/9: 9.8, BB/9: 1.8, Neutral
-  Partly Cloudy, 78F, Wind 15mph W
-  Line: O/U 9.5 | Over -106 / Under -113 (avg of 6 books)
-  Lean: LEAN UNDER
-   -> Wind OUT at 15mph W — ball carries, HR risk up
-   -> Neutral temp (78F)
-   -> Home pitcher ERA 1.80 — elite, suppresses scoring
-   -> Away lineup cold (avg OPS 0.648 last 15 games)
-   -> Away has 4 cold hitters (OPS < .650): Dunn, Lowe, Arroyo
----
-Washington Nationals @ Tampa Bay Rays
-  Tropicana Field
-  Away: PJ Poulin — ERA: 3.25, K/9: 5.9, BB/9: 5.9, Neutral
-  Home: Griffin Jax — ERA: 3.60, K/9: 8.6, BB/9: 3.6, Neutral
-  Line: O/U 7.8 | Over -88 / Under -118 (avg of 9 books)
-  Lean: DOME — LEAN UNDER
-   -> Weather irrelevant — dome
-   -> Away ERA 3.25 — solid
-   -> Away has 3 cold hitters (OPS < .650): Chaparro, Millas, Crews
-   -> Home lineup cold (avg OPS 0.606 last 15 games)
-   -> Home has 5 cold hitters (OPS < .650): DeLuca, Aranda, Palacios
----
-San Francisco Giants @ Miami Marlins
-  loanDepot park
-  Away: Landen Roupp — ERA: 4.24, K/9: 9.9, BB/9: 3.9, GB
-  Home: Lake Bachar — ERA: 2.90, K/9: 10.3, BB/9: 3.4, FB
-  Mostly Clear, 85F, Wind 8mph S
-  Line: O/U 7.8 | Over -111 / Under -42 (avg of 6 books)
+  Away: Andrew Abbott — ERA: 3.95, K/9: 6.5, BB/9: 4.1, FB
+  Home: Will Warren — ERA: 3.47, K/9: 9.4, BB/9: 3.0, Neutral
+  Partly Cloudy, 72F, Wind 14mph NW
+  Line: O/U 9.5 | Over -37 / Under -116 (avg of 9 books)
   Lean: TILT OVER
-   -> Calm wind at 8mph — no wind edge
-   -> Warm (85F) — slight carry boost
-   -> Home pitcher ERA 2.90 — solid, mild under lean
-   -> Home K/9 10.3 — high strikeout rate caps offense
-   -> Away lineup hot (avg OPS 0.857 last 15 games)
-   -> Away has 5 hot hitters (OPS > .800): Cox, Eldridge, Hoo
-   -> Home has 4 hot hitters (OPS > .800): Ruiz, Mack, Hernández
-   -> Home has 4 cold hitters (OPS < .650): Norby, Sanoja, Morel
+  Edge: PASS — Market agrees but juice not favorable enough (-37/-116)
+   -> Wind OUT at 14mph NW — mild carry boost
+   -> Neutral temp (72F)
+   -> Away fly ball pitcher (GO/AO 0.67) + wind out — amplified OVER
+   -> Home pitcher ERA 3.47 — solid, mild under lean
+   -> Away lineup cold (avg OPS 0.644 last 15 games)
+   -> Away has 4 cold hitters (OPS < .650): Suárez, Lowe, Arroyo
+   -> Home has 3 hot hitters (OPS > .800): Chisholm, Rice, Caballero
 ---
-Milwaukee Brewers @ Atlanta Braves
-  Truist Park
-  Away: Jacob Misiorowski — ERA: 1.34, K/9: 13.6, BB/9: 2.3, Neutral
-  Home: Martín Pérez — ERA: 2.90, K/9: 7.4, BB/9: 3.0, Neutral
-  Partly Cloudy, 79F, Wind 5mph NW
-  Line: O/U 7.5 | Over -110 / Under -109 (avg of 6 books)
-  Lean: LEAN UNDER
-   -> Calm wind at 5mph — no wind edge
-   -> Neutral temp (79F)
-   -> Away pitcher ERA 1.34 — elite, suppresses scoring
-   -> Away K/9 13.6 — high strikeout rate caps offense
-   -> Home pitcher ERA 2.90 — solid, mild under lean
-   -> Away lineup hot (avg OPS 0.901 last 15 games)
-   -> Away has 6 hot hitters (OPS > .800): Chourio, Vaughn, Sánchez
-   -> Home has 3 hot hitters (OPS > .800): Baldwin, Olson, Dubón
-   -> Home has 3 cold hitters (OPS < .650): Riley, Smith, Kim
+Toronto Blue Jays @ Chicago Cubs
+  Wrigley Field
+  Away: Patrick Corbin — ERA: 4.57, K/9: 6.3, BB/9: 3.0, Neutral
+  Home: Colin Rea — ERA: 5.35, K/9: 6.8, BB/9: 3.4, Neutral
+  Slight Chance Rain Showers, 67F, Wind 10mph SW
+  Line: O/U 9.2 | Over -90 / Under -42 (avg of 9 books)
+  Lean: AVOID
+   -> Wind OUT at 10mph SW — mild carry boost
+   -> Neutral temp (67F)
+   -> Slight Chance Rain Showers — postponement risk, avoid or wait
 ---
 San Diego Padres @ Texas Rangers
   Globe Life Field
-  Away: Randy Vásquez — ERA: 3.63, K/9: 7.0, BB/9: 2.7, FB
-  Home: Jacob deGrom — ERA: 3.17, K/9: 10.4, BB/9: 1.8, FB
-  Line: O/U 7.5 | Over -115 / Under -105 (avg of 6 books)
+  Away: Walker Buehler — ERA: 4.14, K/9: 7.8, BB/9: 2.9, Neutral
+  Home: Nathan Eovaldi — ERA: 4.23, K/9: 8.6, BB/9: 2.2, GB
+  Line: O/U 7.5 | Over -116 / Under -105 (avg of 9 books)
+  Lean: DOME — LEAN UNDER
+  Edge: PASS — Market agrees but juice not favorable enough (-116/-105)
+   -> Weather irrelevant — dome
+   -> Away has 3 cold hitters (OPS < .650): Machado, Sheets, Bowen
+   -> Home has 3 cold hitters (OPS < .650): Kelenic, Freeman, Osuna
+---
+Washington Nationals @ Tampa Bay Rays
+  Tropicana Field
+  Away: Cade Cavalli — ERA: 3.98, K/9: 9.8, BB/9: 3.0, Neutral
+  Home: TBD (no stats)
+  Line: No odds available
   Lean: DOME — LEAN UNDER
    -> Weather irrelevant — dome
-   -> Home ERA 3.17 — solid
-   -> Home K/9 10.4 — high K
-   -> Away lineup cold (avg OPS 0.658 last 15 games)
-   -> Away has 3 cold hitters (OPS < .650): Machado, Sheets, Bowen
-   -> Home lineup cold (avg OPS 0.653 last 15 games)
-   -> Home has 4 cold hitters (OPS < .650): Jung, Kelenic, Freeman
+   -> Away has 3 cold hitters (OPS < .650): Chaparro, Millas, Crews
+   -> Home lineup cold (avg OPS 0.616 last 15 games)
+   -> Home has 4 cold hitters (OPS < .650): Palacios, Aranda, Williamson
+---
+San Francisco Giants @ Miami Marlins
+  loanDepot park
+  Away: Trevor McDonald — ERA: 4.64, K/9: 8.7, BB/9: 3.2, GB
+  Home: Max Meyer — ERA: 2.75, K/9: 10.1, BB/9: 3.4, FB
+  Partly Cloudy, 82F, Wind 5mph S
+  Line: O/U 7.9 | Over -109 / Under -67 (avg of 9 books)
+  Lean: TILT OVER
+  Edge: CONSIDER — Market agrees, price acceptable (-109/-67)
+   -> Calm wind at 5mph — no wind edge
+   -> Warm (82F) — slight carry boost
+   -> Home pitcher ERA 2.75 — solid, mild under lean
+   -> Home K/9 10.1 — high strikeout rate caps offense
+   -> Away lineup hot (avg OPS 0.853 last 15 games)
+   -> Away has 5 hot hitters (OPS > .800): Cox, Eldridge, Hoo
+   -> Home has 4 hot hitters (OPS > .800): Ruiz, Mack, Hernández
+   -> Home has 4 cold hitters (OPS < .650): Sanoja, Norby, Morel
+---
+Milwaukee Brewers @ Atlanta Braves
+  Truist Park
+  Away: Kyle Harrison — ERA: 2.47, K/9: 11.0, BB/9: 2.5, FB
+  Home: Chris Sale — ERA: 2.30, K/9: 10.6, BB/9: 2.3, Neutral
+  Partly Cloudy, 74F, Wind 0mph 
+  Line: O/U 7.5 | Over -110 / Under -110 (avg of 9 books)
+  Lean: STRONG UNDER
+  Edge: PASS — Market agrees but juice not favorable enough (-110/-110)
+   -> Calm wind at 0mph — no wind edge
+   -> Neutral temp (74F)
+   -> Away pitcher ERA 2.47 — elite, suppresses scoring
+   -> Away K/9 11.0 — high strikeout rate caps offense
+   -> Home pitcher ERA 2.30 — elite, suppresses scoring
+   -> Home K/9 10.6 — high strikeout rate caps offense
+   -> Away lineup hot (avg OPS 0.861 last 15 games)
+   -> Away has 5 hot hitters (OPS > .800): Chourio, Vaughn, Sánchez
+   -> Home has 3 hot hitters (OPS > .800): Dubón, Baldwin, Olson
+   -> Home has 4 cold hitters (OPS < .650): White, Riley, Smith
 ---
 Cleveland Guardians @ Houston Astros
   Daikin Park
-  Away: Tanner Bibee — ERA: 3.96, K/9: 7.6, BB/9: 2.8, FB
-  Home: Tatsuya Imai — ERA: 6.43, K/9: 9.5, BB/9: 6.2, GB
-  Showers And Thunderstorms Likely, 88F, Wind 10mph S
-  Line: O/U 8.5 | Over -105 / Under -114 (avg of 6 books)
+  Away: Joey Cantillo — ERA: 4.38, K/9: 8.4, BB/9: 4.5, FB
+  Home: Spencer Arrighetti — ERA: 2.57, K/9: 8.6, BB/9: 4.6, FB
+  Chance Showers And Thunderstorms, 84F, Wind 10mph SE
+  Line: O/U 8.5 | Over -105 / Under -115 (avg of 8 books)
   Lean: AVOID
-   -> Wind OUT at 10mph S — mild carry boost
-   -> Warm (88F) — slight carry boost
-   -> Showers And Thunderstorms Likely — postponement risk, avoid or wait
+   -> Wind OUT at 10mph SE — mild carry boost
+   -> Warm (84F) — slight carry boost
+   -> Chance Showers And Thunderstorms — postponement risk, avoid or wait
 ---
-St. Louis Cardinals @ Kansas City Royals
-  Kauffman Stadium
-  Away: Michael McGreevy — ERA: 2.99, K/9: 5.9, BB/9: 2.2, Neutral
-  Home: Seth Lugo — ERA: 3.86, K/9: 7.5, BB/9: 2.8, FB
-  Partly Sunny, 81F, Wind 5mph SW
-  Line: O/U 9.1 | Over -92 / Under -83 (avg of 9 books)
-  Lean: STRONG OVER
-   -> Calm wind at 5mph — no wind edge
-   -> Warm (81F) — slight carry boost
-   -> Away pitcher ERA 2.99 — solid, mild under lean
-   -> Away lineup hot (avg OPS 0.818 last 15 games)
-   -> Away has 6 hot hitters (OPS > .800): Burleson, Jordan, Wetherholt
-   -> Home lineup hot (avg OPS 0.808 last 15 games)
-   -> Home has 4 hot hitters (OPS > .800): Caglianone, Witt, Massey
+New York Mets @ Philadelphia Phillies
+  Citizens Bank Park
+  Away: Freddy Peralta — ERA: 3.90, K/9: 8.8, BB/9: 3.6, Neutral
+  Home: Cristopher Sánchez — ERA: 1.82, K/9: 10.6, BB/9: 1.7, GB
+  Line: O/U 7.5 | Over -110 / Under -109 (avg of 9 books)
+  Lean: UNKNOWN VENUE
+  Edge: PASS — Market agrees but juice not favorable enough (-110/-109)
 ---
 Pittsburgh Pirates @ Colorado Rockies
   Coors Field
-  Away: Bubba Chandler — ERA: 4.76, K/9: 9.0, BB/9: 5.4, FB
-  Home: Kyle Freeland — ERA: 7.98, K/9: 7.5, BB/9: 2.5, Neutral
-  Sunny, 80F, Wind 7mph ENE
-  Line: O/U 10.1 | Over -72 / Under -108 (avg of 5 books)
-  Lean: STRONG OVER
+  Away: Paul Skenes — ERA: 2.85, K/9: 10.9, BB/9: 1.8, Neutral
+  Home: Tomoyuki Sugano — ERA: 4.54, K/9: 5.0, BB/9: 2.7, FB
+  Partly Cloudy, 77F, Wind 7mph E
+  Line: O/U 10.1 | Over -61 / Under -109 (avg of 8 books)
+  Lean: NEUTRAL
    -> Calm wind at 7mph — no wind edge
-   -> Warm (80F) — slight carry boost
-   -> Away fly ball pitcher at Coors — extreme OVER amplifier
-   -> Home pitcher ERA 7.98 — hittable, over lean
-   -> Away lineup cold (avg OPS 0.621 last 15 games)
-   -> Away has 4 cold hitters (OPS < .650): Triolo, Davis, Valdez
-   -> Home lineup hot (avg OPS 0.837 last 15 games)
-   -> Home has 6 hot hitters (OPS > .800): Goodman, Karros, Thompson
+   -> Neutral temp (77F)
+   -> Away pitcher ERA 2.85 — solid, mild under lean
+   -> Away K/9 10.9 — high strikeout rate caps offense
+   -> Home fly ball pitcher at Coors — extreme OVER amplifier
+   -> Away lineup cold (avg OPS 0.608 last 15 games)
+   -> Away has 5 cold hitters (OPS < .650): Triolo, Ozuna, Davis
+   -> Home lineup hot (avg OPS 0.813 last 15 games)
+   -> Home has 6 hot hitters (OPS > .800): Goodman, Karros, McCarthy
 ---
 Los Angeles Angels @ Athletics
   Sutter Health Park
-  Away: José Soriano — ERA: 2.79, K/9: 9.5, BB/9: 4.3, GB
-  Home: Jeffrey Springs — ERA: 5.13, K/9: 7.8, BB/9: 2.6, FB
-  Sunny, 78F, Wind 10mph SW
-  Line: O/U 10.0 | Over -109 / Under -111 (avg of 9 books)
-  Lean: OVER
+  Away: TBD (no stats)
+  Home: J.T. Ginn — ERA: 2.91, K/9: 7.9, BB/9: 3.7, Neutral
+  Clear, 70F, Wind 10mph SW
+  Line: O/U 9.7 | Over -112 / Under -94 (avg of 9 books)
+  Lean: TILT OVER
+  Edge: CONSIDER — Market agrees, price acceptable (-112/-94)
    -> Wind OUT at 10mph SW — mild carry boost
-   -> Neutral temp (78F)
-   -> Away pitcher ERA 2.79 — solid, mild under lean
-   -> Away ground ball pitcher (GO/AO 1.43) — wind out effect reduced
-   -> Home pitcher ERA 5.13 — hittable, over lean
-   -> Home fly ball pitcher (GO/AO 0.73) + wind out — amplified OVER
+   -> Neutral temp (70F)
+   -> Home pitcher ERA 2.91 — solid, mild under lean
    -> Away has 3 hot hitters (OPS > .800): Walton, O'Hoppe, Siri
    -> Home has 3 hot hitters (OPS > .800): Heim, Bolte, Williams
    -> Home has 4 cold hitters (OPS < .650): Muncy, McNeil, Thomas
 ---
-Minnesota Twins @ Arizona Diamondbacks
-  Chase Field
-  Away: Connor Prielipp — ERA: 5.26, K/9: 9.2, BB/9: 3.6, FB
-  Home: Michael Soroka — ERA: 3.11, K/9: 8.8, BB/9: 1.9, FB
-  Line: O/U 9.0 | Over -115 / Under -64 (avg of 5 books)
-  Lean: DOME — NEUTRAL
-   -> Weather irrelevant — dome
-   -> Away ERA 5.26 — hittable
-   -> Home ERA 3.11 — solid
-   -> Away has 3 hot hitters (OPS > .800): Buxton, Clemens, Bell
-   -> Home has 4 hot hitters (OPS > .800): Moreno, Perdomo, Carroll
-   -> Home has 4 cold hitters (OPS < .650): Del, Gurriel, Vargas
----
 Baltimore Orioles @ Los Angeles Dodgers
   UNIQLO Field at Dodger Stadium
-  Away: Trey Gibson — ERA: 5.91, K/9: 5.1, BB/9: 5.5, GB
-  Home: Roki Sasaki — ERA: 4.76, K/9: 9.2, BB/9: 3.5, Neutral
-  Partly Sunny, 70F, Wind 10mph SW
-  Line: O/U 8.5 | Over -113 / Under -106 (avg of 5 books)
-  Lean: TILT OVER
+  Away: Trevor Rogers — ERA: 5.86, K/9: 6.5, BB/9: 3.0, FB
+  Home: Yoshinobu Yamamoto — ERA: 2.52, K/9: 8.4, BB/9: 1.6, Neutral
+  Partly Cloudy, 68F, Wind 10mph SW
+  Line: O/U 8.5 | Over -112 / Under -107 (avg of 6 books)
+  Lean: OVER
+  Edge: CONSIDER — Market agrees, price acceptable (-112/-107)
    -> Wind OUT at 10mph SW — mild carry boost
-   -> Neutral temp (70F)
-   -> Away pitcher ERA 5.91 — hittable, over lean
-   -> Away ground ball pitcher (GO/AO 1.72) — wind out effect reduced
+   -> Neutral temp (68F)
+   -> Away pitcher ERA 5.86 — hittable, over lean
+   -> Away fly ball pitcher (GO/AO 0.67) + wind out — amplified OVER
+   -> Home pitcher ERA 2.52 — solid, mild under lean
    -> Home has 4 hot hitters (OPS > .800): Freeman, Muncy, Rushing
    -> Home has 3 cold hitters (OPS < .650): Pages, Freeland, Call
 ---
 Boston Red Sox @ Seattle Mariners
   T-Mobile Park
-  Away: Ranger Suarez — ERA: 3.21, K/9: 9.0, BB/9: 2.7, FB
-  Home: Bryce Miller — ERA: 1.54, K/9: 9.3, BB/9: 1.3, FB
-  Sunny, 79F, Wind 6mph NW
-  Line: O/U 7.3 | Over -31 / Under -28 (avg of 5 books)
-  Lean: STRONG UNDER
+  Away: Connelly Early — ERA: 3.81, K/9: 8.6, BB/9: 3.5, FB
+  Home: Emerson Hancock — ERA: 3.28, K/9: 8.5, BB/9: 1.9, FB
+  Mostly Clear, 75F, Wind 6mph NNW
+  Line: O/U 7.4 | Over -22 / Under -55 (avg of 7 books)
+  Lean: UNDER
+  Edge: CONSIDER — Market agrees, price acceptable (-22/-55)
    -> Calm wind at 6mph — no wind edge
-   -> Neutral temp (79F)
-   -> Away pitcher ERA 3.21 — solid, mild under lean
-   -> Home pitcher ERA 1.54 — elite, suppresses scoring
+   -> Neutral temp (75F)
+   -> Home pitcher ERA 3.28 — solid, mild under lean
    -> Away lineup cold (avg OPS 0.656 last 15 games)
    -> Away has 6 cold hitters (OPS < .650): Yoshida, Mayer, Duran
    -> Home has 3 hot hitters (OPS > .800): Canzone, Emerson, Crawford
    -> Home has 3 cold hitters (OPS < .650): Raley, Rodríguez, Raleigh
 ---
+Minnesota Twins @ Arizona Diamondbacks
+  Chase Field
+  Away: Taj Bradley — ERA: 4.14, K/9: 10.1, BB/9: 3.8, FB
+  Home: Zac Gallen — ERA: 5.35, K/9: 6.0, BB/9: 2.7, Neutral
+  Line: O/U 9.0 | Over -119 / Under +13 (avg of 7 books)
+  Lean: DOME — NEUTRAL
+   -> Weather irrelevant — dome
+   -> Away K/9 10.1 — high K
+   -> Home ERA 5.35 — hittable
+   -> Away has 3 hot hitters (OPS > .800): Buxton, Clemens, Bell
+   -> Home has 4 hot hitters (OPS > .800): Moreno, Perdomo, Carroll
+   -> Home has 4 cold hitters (OPS < .650): Del, Gurriel, Vargas
+---
+
+============================
+ TODAY'S TOP CALLS
+============================
+
+1. STRONG UNDER   — Milwaukee Brewers @ Atlanta Braves | Line 7.5 | Over -110 / Under -110
+2. UNDER          — Chicago White Sox @ Detroit Tigers | No odds
+3. OVER           — Baltimore Orioles @ Los Angeles Dodgers | Line 8.5 | Over -112 / Under -107
+4. UNDER          — Boston Red Sox @ Seattle Mariners | Line 7.4 | Over -22 / Under -55
+5. TILT OVER      — Cincinnati Reds @ New York Yankees | Line 9.5 | Over -37 / Under -116
+6. DOME — LEAN UNDER — San Diego Padres @ Texas Rangers | Line 7.5 | Over -116 / Under -105
+7. DOME — LEAN UNDER — Washington Nationals @ Tampa Bay Rays | No odds
+8. TILT OVER      — San Francisco Giants @ Miami Marlins | Line 7.9 | Over -109 / Under -67
+9. TILT OVER      — Los Angeles Angels @ Athletics | Line 9.7 | Over -112 / Under -94
+10. AVOID          — Toronto Blue Jays @ Chicago Cubs | Line 9.2 | Over -90 / Under -42
+11. AVOID          — Cleveland Guardians @ Houston Astros | Line 8.5 | Over -105 / Under -115
+
+(NEUTRAL and dome games with no lean hidden)
+============================
+

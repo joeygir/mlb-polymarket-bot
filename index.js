@@ -26,6 +26,7 @@ const STADIUMS = {
   'Progressive Field':                { lat: 41.4962, lon: -81.6852, outDirs: ['S','SW','SSW','SE','SSE'] },
   'loanDepot park':                   { lat: 25.7781, lon: -80.2197, outDirs: ['E','NE','ENE','SE','ESE'] },
   'Daikin Park':                      { lat: 29.7573, lon: -95.3555, outDirs: ['S','SW','SSW','SE','SSE'] },
+  'Citizens Bank Park':               { lat: 39.9061, lon: -75.1665, outDirs: ['N','NW','NNW','NE','NNE'] },
   'American Family Field':            { lat: 43.0280, lon: -87.9712, outDirs: null },
   'Chase Field':                      { lat: 33.4453, lon: -112.0667, outDirs: null },
   'Globe Life Field':                 { lat: 32.7473, lon: -97.0845, outDirs: null },
@@ -330,7 +331,53 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
 
   return { lean, signals, score };
 }
+function detectEdge(lean, odds) {
+  if (!odds || lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
+    return null;
+  }
 
+  const isOverLean = ['STRONG OVER', 'OVER', 'LEAN OVER', 'TILT OVER', 'DOME — LEAN OVER'].includes(lean);
+  const isUnderLean = ['STRONG UNDER', 'UNDER', 'LEAN UNDER', 'TILT UNDER', 'DOME — LEAN UNDER'].includes(lean);
+  const isStrong = ['STRONG OVER', 'STRONG UNDER'].includes(lean);
+  const isMedium = ['OVER', 'UNDER', 'LEAN OVER', 'LEAN UNDER'].includes(lean);
+
+  const overJuice = parseInt(odds.overJuice);
+  const underJuice = parseInt(odds.underJuice);
+
+  const marketFavorsOver = overJuice < underJuice;
+  const marketFavorsUnder = underJuice < overJuice;
+
+  const relevantJuice = isOverLean ? overJuice : underJuice;
+  const marketAgrees = (isOverLean && marketFavorsOver) || (isUnderLean && marketFavorsUnder);
+  const marketDisagrees = (isOverLean && marketFavorsUnder) || (isUnderLean && marketFavorsOver);
+
+  // Juice thresholds
+  const juiceTooExpensive = relevantJuice < -130;
+  const juiceFair = relevantJuice >= -115;
+  const juiceNearEven = relevantJuice >= -108;
+
+  if (juiceTooExpensive) {
+    return { label: 'PASS', reason: `Market already priced this — juice too expensive (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketDisagrees && isStrong) {
+    return { label: 'PRIME TARGET', reason: `Bot strongly disagrees with market direction — maximum gap (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketDisagrees && isMedium) {
+    return { label: 'TARGET', reason: `Bot leans against market direction — gap exists (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketAgrees && juiceNearEven && isStrong) {
+    return { label: 'SHARP', reason: `Market agrees but juice still fair — strong signal at good price (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketAgrees && juiceFair) {
+    return { label: 'CONSIDER', reason: `Market agrees, price acceptable (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  return { label: 'PASS', reason: `Market agrees but juice not favorable enough (${odds.overJuice}/${odds.underJuice})` };
+}
 async function getOdds() {
   try {
     const res = await axios.get('https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/', {
@@ -423,9 +470,10 @@ async function getTodayGames() {
     console.log(`  Home: ${fmtPitcher(homePitcher, homeStats)}`);
     if (weather && !analysis.lean.startsWith('DOME')) {
       console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
-    }
-    console.log(`  Line: ${oddsLine}`);
-    console.log(`  Lean: ${analysis.lean}`);
+    }console.log(`  Line: ${oddsLine}`);
+console.log(`  Lean: ${analysis.lean}`);
+const edge = detectEdge(analysis.lean, odds);
+if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
 
