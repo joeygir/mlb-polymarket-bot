@@ -45,22 +45,6 @@ const CROSSWIND_DIRS = {
   'Citi Field':             ['N','S','NNE','SSW','NNW','SSE'],
 };
 
-const LEAN_RANK = {
-  'STRONG OVER': 6,
-  'OVER': 5,
-  'LEAN OVER': 4,
-  'TILT OVER': 3,
-  'STRONG UNDER': 6,
-  'UNDER': 5,
-  'LEAN UNDER': 4,
-  'TILT UNDER': 3,
-  'AVOID': 2,
-  'NEUTRAL': 0,
-  'DOME — NEUTRAL': 0,
-  'DOME — LEAN OVER': 3,
-  'DOME — LEAN UNDER': 3,
-};
-
 async function getPitcherStats(pitcherName) {
   try {
     const search = await axios.get(
@@ -225,7 +209,7 @@ function scoreLineup(hitters, label) {
 
 function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters) {
   const stadium = STADIUMS[venue];
-  if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [], score: 0 };
+  if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [] };
 
   if (!stadium.outDirs) {
     const signals = ['Weather irrelevant — dome'];
@@ -250,10 +234,10 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
     let lean = 'DOME — NEUTRAL';
     if (score >= 2) lean = 'DOME — LEAN OVER';
     else if (score <= -2) lean = 'DOME — LEAN UNDER';
-    return { lean, signals, score };
+    return { lean, signals };
   }
 
-  if (!weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'], score: 0 };
+  if (!weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'] };
 
   const { avgTemp, maxWind, windDir, condition } = weather;
   const signals = [];
@@ -301,7 +285,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   const rainKeywords = ['rain', 'shower', 'storm', 'thunderstorm', 'drizzle'];
   if (rainKeywords.some(k => condition.toLowerCase().includes(k))) {
     signals.push(`${condition} — postponement risk, avoid or wait`);
-    return { lean: 'AVOID', signals, score: 0 };
+    return { lean: 'AVOID', signals };
   }
 
   const windIsOut = isOut && maxWind >= 10;
@@ -328,7 +312,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   else if (score <= -4) lean = 'STRONG UNDER';
   else lean = 'NEUTRAL';
 
-  return { lean, signals, score };
+  return { lean, signals };
 }
 
 async function getOdds() {
@@ -351,19 +335,14 @@ async function getOdds() {
         if (!market) continue;
         const over = market.outcomes.find(o => o.name === 'Over');
         const under = market.outcomes.find(o => o.name === 'Under');
-        if (over && under) lines.push({ point: over.point, overPrice: over.price, underPrice: under.price });
+        if (over && under) lines.push({ book: book.title, point: over.point, overPrice: over.price, underPrice: under.price });
       }
       if (lines.length > 0) {
         const avgTotal = lines.reduce((a, b) => a + b.point, 0) / lines.length;
         const avgOver = lines.reduce((a, b) => a + b.overPrice, 0) / lines.length;
         const avgUnder = lines.reduce((a, b) => a + b.underPrice, 0) / lines.length;
         const fmt = p => p > 0 ? `+${Math.round(p)}` : `${Math.round(p)}`;
-        oddsMap[key] = {
-          display: `O/U ${avgTotal.toFixed(1)} | Over ${fmt(avgOver)} / Under ${fmt(avgUnder)} (avg of ${lines.length} books)`,
-          total: avgTotal.toFixed(1),
-          overJuice: fmt(avgOver),
-          underJuice: fmt(avgUnder),
-        };
+        oddsMap[key] = `O/U ${avgTotal.toFixed(1)} | Over ${fmt(avgOver)} / Under ${fmt(avgUnder)} (avg of ${lines.length} books)`;
       }
     }
     return oddsMap;
@@ -381,8 +360,6 @@ async function getTodayGames() {
   console.log(`\n============================`);
   console.log(` MLB OVER/UNDER BOT — ${today}`);
   console.log(`============================\n`);
-
-  const results = [];
 
   for (const game of games) {
     const home = game.teams.home.team.name;
@@ -414,8 +391,7 @@ async function getTodayGames() {
     };
 
     const oddsKey = `${away}|${home}`;
-    const odds = oddsMap[oddsKey];
-    const oddsLine = odds?.display || 'No odds available';
+    const oddsLine = oddsMap[oddsKey] || 'No odds available';
 
     console.log(`${away} @ ${home}`);
     console.log(`  ${venue}`);
@@ -428,30 +404,7 @@ async function getTodayGames() {
     console.log(`  Lean: ${analysis.lean}`);
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
-
-    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score });
   }
-
-  // Leaderboard
-  const actionable = results
-    .filter(r => !['NEUTRAL', 'DOME — NEUTRAL', 'NO DATA', 'UNKNOWN VENUE'].includes(r.lean))
-    .sort((a, b) => (LEAN_RANK[b.lean] || 0) - (LEAN_RANK[a.lean] || 0));
-
-  console.log(`\n============================`);
-  console.log(` TODAY\'S TOP CALLS`);
-  console.log(`============================\n`);
-
-  if (actionable.length === 0) {
-    console.log('No strong signals today.');
-  } else {
-    actionable.forEach((r, i) => {
-      const line = r.odds ? `Line ${r.odds.total} | Over ${r.odds.overJuice} / Under ${r.odds.underJuice}` : 'No odds';
-      console.log(`${i + 1}. ${r.lean.padEnd(14)} — ${r.game} | ${line}`);
-    });
-  }
-
-  console.log(`\n(NEUTRAL and dome games with no lean hidden)`);
-  console.log(`============================\n`);
 }
 
 getTodayGames();
