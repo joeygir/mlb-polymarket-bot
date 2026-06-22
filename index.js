@@ -289,6 +289,23 @@ const LEAN_RANK = {
   'DOME — LEAN UNDER': 3,
 };
 
+// Signal priority hierarchy for over/under prediction, most to least predictive.
+// Tier 1: starting pitcher xERA, park factor/altitude, reliable-park wind at 10mph+.
+// Tier 2: WHIP traffic, lineup OPS, temperature extremes, ERA-xERA regression gap.
+// Tier 3: individual hot/cold hitters, GB/FB+wind interaction, unreliable/moderate wind.
+const TIER_WEIGHTS = { 1: 3, 2: 2, 3: 1 };
+const SCORE_NORMALIZATION = TIER_WEIGHTS[1]; // one Tier-1 signal ≈ 1.0 normalized point
+
+function computeConfidence(weightedSignals) {
+  const count = (tier, direction) => weightedSignals.filter(w => w.tier === tier && w.direction === direction).length;
+  const tier1Max = Math.max(count(1, 'OVER'), count(1, 'UNDER'));
+  const tier2Max = Math.max(count(2, 'OVER'), count(2, 'UNDER'));
+
+  if (tier1Max >= 2) return 'HIGH';
+  if (tier1Max >= 1 || tier2Max >= 3) return 'MEDIUM';
+  return 'LOW';
+}
+
 async function getPitcherStats(pitcherName) {
   try {
     const search = await axios.get(
@@ -304,13 +321,62 @@ async function getPitcherStats(pitcherName) {
     const splits = stats.data.stats?.[0]?.splits?.[0]?.stat;
     if (!splits) return null;
 
+    const xera = await getXERA(player.id);
+
     return {
       name: pitcherName,
       era: parseFloat(splits.era),
       groundOutsToAirouts: parseFloat(splits.groundOutsToAirouts),
       strikeoutsPer9Inn: parseFloat(splits.strikeoutsPer9Inn),
       walksPer9Inn: parseFloat(splits.walksPer9Inn),
+      whip: parseFloat(splits.whip),
+      xera,
     };
+  } catch {
+    return null;
+  }
+}
+
+// Baseball Savant's custom leaderboard CSV does not expose FIP/xFIP (those are
+// FanGraphs metrics, not Statcast-derived) — confirmed empty on live pulls for
+// both 2025 (completed season) and 2026. xERA is the closest real Statcast
+// equivalent (expected ERA from quality of contact), so it's used in its place.
+let savantXeraTable = null;
+
+function parseSavantCSVLine(line) {
+  const fields = [];
+  let cur = '';
+  let inQ = false;
+  for (const ch of line) {
+    if (ch === '"') { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { fields.push(cur); cur = ''; }
+    else { cur += ch; }
+  }
+  fields.push(cur);
+  return fields;
+}
+
+function parseSavantCSV(content) {
+  const lines = content.replace(/^﻿/, '').trim().split('\n').filter(Boolean);
+  const headers = parseSavantCSVLine(lines[0]).map(h => h.trim());
+  return lines.slice(1).map(line => {
+    const fields = parseSavantCSVLine(line);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = (fields[i] || '').trim(); });
+    return obj;
+  });
+}
+
+async function getXERA(playerId) {
+  try {
+    const year = new Date().getFullYear();
+    if (!savantXeraTable || savantXeraTable.year !== year) {
+      const url = `https://baseballsavant.mlb.com/leaderboard/custom?year=${year}&type=pitcher&filter=&sort=4&sortDir=asc&min=1&selections=p_game,p_formatted_ip,p_era,xera&chart=false&x=p_era&y=xera&r=no&toggledStat=&csv=true`;
+      const res = await axios.get(url);
+      savantXeraTable = { year, rows: parseSavantCSV(res.data) };
+    }
+    const row = savantXeraTable.rows.find(r => r.player_id === String(playerId));
+    return row?.xera ? parseFloat(row.xera) : null;
   } catch {
     return null;
   }
@@ -372,210 +438,248 @@ async function getWeather(lat, lon) {
 
 function scorePitchers(awayStats, homeStats, windIsOut, venue) {
   const signals = [];
+  const weighted = [];
   let overScore = 0;
   let underScore = 0;
   const isCoors = venue === 'Coors Field';
+
+  const add = (text, direction, tier) => {
+    signals.push(text);
+    const weight = TIER_WEIGHTS[tier];
+    weighted.push({ direction, tier, weight });
+    if (direction === 'OVER') overScore += weight; else underScore += weight;
+  };
 
   for (const [side, stats] of [['Away', awayStats], ['Home', homeStats]]) {
     if (!stats) continue;
 
     const isFlyBall = stats.groundOutsToAirouts < 0.9;
     const isGroundBall = stats.groundOutsToAirouts > 1.2;
-    const isElite = stats.era < 2.50;
-    const isSolid = stats.era < 3.50;
-    const isHittable = stats.era > 5.00;
+    const usingXera = stats.xera != null;
+    const qualityStat = usingXera ? stats.xera : stats.era;
+    const qualityLabel = usingXera ? `xERA ${qualityStat.toFixed(2)} (ERA ${stats.era.toFixed(2)})` : `ERA ${stats.era.toFixed(2)}`;
+    const isElite = qualityStat < 2.75;
+    const isSolid = qualityStat < 3.50;
+    const isHittable = qualityStat > 4.75;
     const isHighK = stats.strikeoutsPer9Inn > 10.0;
 
+    // Tier 1 — starting pitcher xERA is the primary quality signal.
     if (isElite) {
-      signals.push(`${side} pitcher ERA ${stats.era.toFixed(2)} — elite, suppresses scoring`);
-      underScore += 2;
+      add(`${side} pitcher ${qualityLabel} — elite, suppresses scoring`, 'UNDER', 1);
     } else if (isSolid) {
-      signals.push(`${side} pitcher ERA ${stats.era.toFixed(2)} — solid, mild under lean`);
-      underScore += 1;
+      add(`${side} pitcher ${qualityLabel} — solid, mild under lean`, 'UNDER', 1);
     } else if (isHittable) {
-      signals.push(`${side} pitcher ERA ${stats.era.toFixed(2)} — hittable, over lean`);
-      overScore += 1;
+      add(`${side} pitcher ${qualityLabel} — hittable, over lean`, 'OVER', 1);
     }
 
+    // Tier 2 — ERA-xERA gap is a luck/regression indicator.
+    if (usingXera) {
+      const gap = stats.era - stats.xera;
+      if (gap < -1.0) {
+        add(`${side} ERA-xERA gap — pitcher has been lucky, regression risk`, 'OVER', 2);
+      } else if (gap > 1.0) {
+        add(`${side} ERA-xERA gap — pitcher has been unlucky, expect improvement`, 'UNDER', 2);
+      }
+    }
+
+    // Tier 3 — GB/FB type only matters in combination with wind.
     if (isFlyBall && windIsOut) {
-      signals.push(`${side} fly ball pitcher (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) + wind out — amplified OVER`);
-      overScore += 2;
+      add(`${side} fly ball pitcher (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) + wind out — amplified OVER`, 'OVER', 3);
     } else if (isGroundBall && windIsOut) {
-      signals.push(`${side} ground ball pitcher (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) — wind out effect reduced`);
-      overScore -= 1;
+      add(`${side} ground ball pitcher (GO/AO ${stats.groundOutsToAirouts.toFixed(2)}) — wind out effect reduced`, 'UNDER', 3);
     }
 
     if (isCoors && isFlyBall) {
-      signals.push(`${side} fly ball pitcher at Coors — extreme OVER amplifier`);
-      overScore += 2;
+      add(`${side} fly ball pitcher at Coors — extreme OVER amplifier`, 'OVER', 3);
     }
 
     if (isHighK) {
-      signals.push(`${side} K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high strikeout rate caps offense`);
-      underScore += 1;
+      add(`${side} K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high strikeout rate caps offense`, 'UNDER', 3);
+    }
+
+    // Tier 2 — WHIP is the baserunner-traffic signal.
+    if (stats.whip > 1.40) {
+      add(`${side} WHIP ${stats.whip.toFixed(2)} — high traffic pitcher, baserunners favor over`, 'OVER', 2);
     }
   }
 
-  return { overScore, underScore, signals };
+  if (awayStats && homeStats) {
+    if (awayStats.whip < 1.10 && homeStats.whip < 1.10) {
+      add('Elite traffic control — low baserunner environment', 'UNDER', 2);
+    } else if (awayStats.whip > 1.35 && homeStats.whip > 1.35) {
+      add('High baserunner traffic — extended innings likely', 'OVER', 2);
+    }
+  }
+
+  return { overScore, underScore, signals, weighted };
 }
 
 function scoreLineup(hitters, label) {
   const signals = [];
+  const weighted = [];
   let overScore = 0;
   let underScore = 0;
 
-  if (!hitters || hitters.length === 0) return { overScore, underScore, signals };
+  if (!hitters || hitters.length === 0) return { overScore, underScore, signals, weighted };
+
+  const add = (text, direction, tier) => {
+    signals.push(text);
+    const weight = TIER_WEIGHTS[tier];
+    weighted.push({ direction, tier, weight });
+    if (direction === 'OVER') overScore += weight; else underScore += weight;
+  };
 
   const avgOps = hitters.reduce((a, b) => a + b.ops, 0) / hitters.length;
   const hotHitters = hitters.filter(h => h.ops > 0.800);
   const coldHitters = hitters.filter(h => h.ops < 0.650);
 
+  // Tier 2 — team-wide lineup OPS.
   if (avgOps > 0.780) {
-    signals.push(`${label} lineup hot (avg OPS ${avgOps.toFixed(3)} last 15 games)`);
-    overScore += 1;
+    add(`${label} lineup hot (avg OPS ${avgOps.toFixed(3)} last 15 games)`, 'OVER', 2);
   } else if (avgOps < 0.660) {
-    signals.push(`${label} lineup cold (avg OPS ${avgOps.toFixed(3)} last 15 games)`);
-    underScore += 1;
+    add(`${label} lineup cold (avg OPS ${avgOps.toFixed(3)} last 15 games)`, 'UNDER', 2);
   }
 
+  // Tier 3 — individual hot/cold hitters are supporting context.
   if (hotHitters.length >= 3) {
-    signals.push(`${label} has ${hotHitters.length} hot hitters (OPS > .800): ${hotHitters.slice(0,3).map(h => h.name.split(' ')[1]).join(', ')}`);
-    overScore += 1;
+    add(`${label} has ${hotHitters.length} hot hitters (OPS > .800): ${hotHitters.slice(0,3).map(h => h.name.split(' ')[1]).join(', ')}`, 'OVER', 3);
   }
 
   if (coldHitters.length >= 3) {
-    signals.push(`${label} has ${coldHitters.length} cold hitters (OPS < .650): ${coldHitters.slice(0,3).map(h => h.name.split(' ')[1]).join(', ')}`);
-    underScore += 1;
+    add(`${label} has ${coldHitters.length} cold hitters (OPS < .650): ${coldHitters.slice(0,3).map(h => h.name.split(' ')[1]).join(', ')}`, 'UNDER', 3);
   }
 
-  return { overScore, underScore, signals };
+  return { overScore, underScore, signals, weighted };
 }
 
 function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters) {
   const stadium = STADIUMS[venue];
-  if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [], score: 0 };
+  if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [], score: 0, confidence: 'N/A' };
 
-  if (!stadium.outDirs) {
-    const signals = ['Weather irrelevant — dome'];
-    let overScore = 0;
-    let underScore = 0;
+  const isDome = !stadium.outDirs;
+  if (!isDome && !weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'], score: 0, confidence: 'N/A' };
 
-    for (const [side, stats] of [['Away', awayStats], ['Home', homeStats]]) {
-      if (!stats) continue;
-      if (stats.era < 2.50) { signals.push(`${side} ERA ${stats.era.toFixed(2)} — elite`); underScore += 2; }
-      else if (stats.era < 3.50) { signals.push(`${side} ERA ${stats.era.toFixed(2)} — solid`); underScore += 1; }
-      else if (stats.era > 5.00) { signals.push(`${side} ERA ${stats.era.toFixed(2)} — hittable`); overScore += 1; }
-      if (stats.strikeoutsPer9Inn > 10.0) { signals.push(`${side} K/9 ${stats.strikeoutsPer9Inn.toFixed(1)} — high K`); underScore += 1; }
-    }
-
-    const awayLineup = scoreLineup(awayHitters, 'Away');
-    const homeLineup = scoreLineup(homeHitters, 'Home');
-    overScore += awayLineup.overScore + homeLineup.overScore;
-    underScore += awayLineup.underScore + homeLineup.underScore;
-    signals.push(...awayLineup.signals, ...homeLineup.signals);
-
-    const score = overScore - underScore;
-    let lean = 'DOME — NEUTRAL';
-    if (score >= 2) lean = 'DOME — LEAN OVER';
-    else if (score <= -2) lean = 'DOME — LEAN UNDER';
-    return { lean, signals, score };
-  }
-
-  if (!weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'], score: 0 };
-
-  const { avgTemp, maxWind, windDir, condition } = weather;
   const signals = [];
+  const weighted = [];
   let overScore = 0;
   let underScore = 0;
+  let windIsOut = false;
 
-  const isOut = stadium.outDirs.includes(windDir);
-  const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
-  const isIn = !isOut && !isCross;
+  const add = (text, direction, tier) => {
+    signals.push(text);
+    const weight = TIER_WEIGHTS[tier];
+    weighted.push({ direction, tier, weight });
+    if (direction === 'OVER') overScore += weight; else underScore += weight;
+  };
+  const merge = (result) => {
+    signals.push(...result.signals);
+    weighted.push(...result.weighted);
+    overScore += result.overScore;
+    underScore += result.underScore;
+  };
 
-  const stadiumNotes = STADIUM_NOTES[venue];
-  const weatherWeight = stadiumNotes?.weatherWeight ?? 1.0;
-  let windOverScore = 0;
-  let windUnderScore = 0;
-
-  if (maxWind >= 15 && isOut) {
-    signals.push(`Wind OUT at ${maxWind}mph ${windDir} — ball carries, HR risk up`);
-    windOverScore += 2;
-  } else if (maxWind >= 10 && isOut) {
-    signals.push(`Wind OUT at ${maxWind}mph ${windDir} — mild carry boost`);
-    windOverScore += 1;
-  } else if (maxWind >= 15 && isIn) {
-    signals.push(`Wind IN at ${maxWind}mph ${windDir} — fly balls die, pitchers favored`);
-    windUnderScore += 2;
-  } else if (maxWind >= 10 && isIn) {
-    signals.push(`Wind IN at ${maxWind}mph ${windDir} — mild suppression`);
-    windUnderScore += 1;
-  } else if (maxWind >= 10) {
-    signals.push(`Crosswind at ${maxWind}mph ${windDir} — minimal scoring effect`);
+  if (isDome) {
+    signals.push('Weather irrelevant — dome');
   } else {
-    signals.push(`Calm wind at ${maxWind}mph — no wind edge`);
+    const { avgTemp, maxWind, windDir, condition } = weather;
+
+    const isOut = stadium.outDirs.includes(windDir);
+    const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
+    const isIn = !isOut && !isCross;
+
+    const stadiumNotes = STADIUM_NOTES[venue];
+    // Wind direction at 10mph+ is Tier 1 only when the park's wind reliability is HIGH —
+    // otherwise it's downgraded to Tier 3 supporting context (matches weatherWeight intent).
+    const windTier = stadiumNotes?.windReliability === 'HIGH' ? 1 : 3;
+    const weatherWeight = stadiumNotes?.weatherWeight ?? 1.0;
+
+    if (maxWind >= 15 && isOut) {
+      add(`Wind OUT at ${maxWind}mph ${windDir} — ball carries, HR risk up`, 'OVER', windTier);
+    } else if (maxWind >= 10 && isOut) {
+      add(`Wind OUT at ${maxWind}mph ${windDir} — mild carry boost`, 'OVER', windTier);
+    } else if (maxWind >= 15 && isIn) {
+      add(`Wind IN at ${maxWind}mph ${windDir} — fly balls die, pitchers favored`, 'UNDER', windTier);
+    } else if (maxWind >= 10 && isIn) {
+      add(`Wind IN at ${maxWind}mph ${windDir} — mild suppression`, 'UNDER', windTier);
+    } else if (maxWind >= 10) {
+      signals.push(`Crosswind at ${maxWind}mph ${windDir} — minimal scoring effect`);
+    } else {
+      signals.push(`Calm wind at ${maxWind}mph — no wind edge`);
+    }
+    // weatherWeight further discounts low/medium-reliability wind within its tier
+    // (e.g. a LOW-reliability park's wind signal weighs less than a MEDIUM one).
+    if (weighted.length > 0 && weatherWeight !== 1.0) {
+      const last = weighted[weighted.length - 1];
+      const discounted = Math.round(last.weight * weatherWeight);
+      const delta = discounted - last.weight;
+      last.weight = discounted;
+      if (last.direction === 'OVER') overScore += delta; else underScore += delta;
+    }
+
+    if (stadiumNotes?.windReliability === 'LOW') {
+      signals.push(`⚠️ WIND UNRELIABLE — ${stadiumNotes.notes}`);
+    } else if (stadiumNotes?.windReliability === 'MEDIUM') {
+      signals.push(`⚡ VERIFY WIND — ${stadiumNotes.notes}`);
+    }
+
+    // Tier 1 — park factor / altitude environment.
+    if (stadiumNotes?.altitudeBoost) {
+      add(`Altitude effect at ${venue} — +${stadiumNotes.altitudeBoost} OVER boost regardless of wind direction`, 'OVER', 1);
+    }
+
+    // Tier 2 — temperature extremes; mild warm/cool is Tier 3 supporting context.
+    if (avgTemp >= 90) {
+      add(`Very hot (${avgTemp}F) — ball carries significantly`, 'OVER', 2);
+    } else if (avgTemp >= 80) {
+      add(`Warm (${avgTemp}F) — slight carry boost`, 'OVER', 3);
+    } else if (avgTemp <= 50) {
+      add(`Cold (${avgTemp}F) — ball suppressed noticeably`, 'UNDER', 2);
+    } else if (avgTemp <= 60) {
+      add(`Cool (${avgTemp}F) — mild suppression`, 'UNDER', 3);
+    } else {
+      signals.push(`Neutral temp (${avgTemp}F)`);
+    }
+
+    const rainKeywords = ['rain', 'shower', 'storm', 'thunderstorm', 'drizzle'];
+    if (rainKeywords.some(k => condition.toLowerCase().includes(k))) {
+      signals.push(`${condition} — postponement risk, avoid or wait`);
+      return { lean: 'AVOID', signals, score: 0, confidence: 'N/A' };
+    }
+
+    windIsOut = isOut && maxWind >= 10;
   }
 
-  overScore += Math.round(windOverScore * weatherWeight);
-  underScore += Math.round(windUnderScore * weatherWeight);
-
-  if (stadiumNotes?.windReliability === 'LOW') {
-    signals.push(`⚠️ WIND UNRELIABLE — ${stadiumNotes.notes}`);
-  } else if (stadiumNotes?.windReliability === 'MEDIUM') {
-    signals.push(`⚡ VERIFY WIND — ${stadiumNotes.notes}`);
-  }
-
-  if (stadiumNotes?.altitudeBoost) {
-    overScore += stadiumNotes.altitudeBoost;
-    signals.push(`Altitude effect at ${venue} — +${stadiumNotes.altitudeBoost} OVER boost regardless of wind direction`);
-  }
-
-  if (avgTemp >= 90) {
-    signals.push(`Very hot (${avgTemp}F) — ball carries significantly`);
-    overScore += 2;
-  } else if (avgTemp >= 80) {
-    signals.push(`Warm (${avgTemp}F) — slight carry boost`);
-    overScore += 1;
-  } else if (avgTemp <= 50) {
-    signals.push(`Cold (${avgTemp}F) — ball suppressed noticeably`);
-    underScore += 2;
-  } else if (avgTemp <= 60) {
-    signals.push(`Cool (${avgTemp}F) — mild suppression`);
-    underScore += 1;
-  } else {
-    signals.push(`Neutral temp (${avgTemp}F)`);
-  }
-
-  const rainKeywords = ['rain', 'shower', 'storm', 'thunderstorm', 'drizzle'];
-  if (rainKeywords.some(k => condition.toLowerCase().includes(k))) {
-    signals.push(`${condition} — postponement risk, avoid or wait`);
-    return { lean: 'AVOID', signals, score: 0 };
-  }
-
-  const windIsOut = isOut && maxWind >= 10;
   const pitcherResult = scorePitchers(awayStats, homeStats, windIsOut, venue);
-  overScore += pitcherResult.overScore;
-  underScore += pitcherResult.underScore;
-  signals.push(...pitcherResult.signals);
+  merge(pitcherResult);
 
   const awayLineup = scoreLineup(awayHitters, 'Away');
   const homeLineup = scoreLineup(homeHitters, 'Home');
-  overScore += awayLineup.overScore + homeLineup.overScore;
-  underScore += awayLineup.underScore + homeLineup.underScore;
-  signals.push(...awayLineup.signals, ...homeLineup.signals);
+  merge(awayLineup);
+  merge(homeLineup);
 
-  const score = overScore - underScore;
+  const rawScore = overScore - underScore;
+  const score = Math.round(rawScore / SCORE_NORMALIZATION);
+
   let lean;
-  if (score >= 4) lean = 'STRONG OVER';
-  else if (score === 3) lean = 'OVER';
-  else if (score === 2) lean = 'LEAN OVER';
-  else if (score === 1) lean = 'TILT OVER';
-  else if (score === -1) lean = 'TILT UNDER';
-  else if (score === -2) lean = 'LEAN UNDER';
-  else if (score === -3) lean = 'UNDER';
-  else if (score <= -4) lean = 'STRONG UNDER';
-  else lean = 'NEUTRAL';
+  if (isDome) {
+    lean = 'DOME — NEUTRAL';
+    if (score >= 2) lean = 'DOME — LEAN OVER';
+    else if (score <= -2) lean = 'DOME — LEAN UNDER';
+  } else {
+    if (score >= 4) lean = 'STRONG OVER';
+    else if (score === 3) lean = 'OVER';
+    else if (score === 2) lean = 'LEAN OVER';
+    else if (score === 1) lean = 'TILT OVER';
+    else if (score === -1) lean = 'TILT UNDER';
+    else if (score === -2) lean = 'LEAN UNDER';
+    else if (score === -3) lean = 'UNDER';
+    else if (score <= -4) lean = 'STRONG UNDER';
+    else lean = 'NEUTRAL';
+  }
 
-  return { lean, signals, score };
+  const confidence = computeConfidence(weighted);
+
+  return { lean, signals, score, confidence };
 }
 function detectEdge(lean, odds, venue) {
   if (!odds || lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
@@ -706,7 +810,7 @@ async function getTodayGames() {
     const fmtPitcher = (name, stats) => {
       if (!stats) return `${name} (no stats)`;
       const type = stats.groundOutsToAirouts < 0.9 ? 'FB' : stats.groundOutsToAirouts > 1.2 ? 'GB' : 'Neutral';
-      return `${name} — ERA: ${stats.era.toFixed(2)}, K/9: ${stats.strikeoutsPer9Inn.toFixed(1)}, BB/9: ${stats.walksPer9Inn.toFixed(1)}, ${type}`;
+      return `${name} — ERA: ${stats.era.toFixed(2)}, WHIP: ${stats.whip.toFixed(2)}, K/9: ${stats.strikeoutsPer9Inn.toFixed(1)}, BB/9: ${stats.walksPer9Inn.toFixed(1)}, ${type}`;
     };
 
     const oddsKey = `${away}|${home}`;
@@ -720,16 +824,17 @@ async function getTodayGames() {
     if (weather && !analysis.lean.startsWith('DOME')) {
       console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
     }console.log(`  Line: ${oddsLine}`);
-console.log(`  Lean: ${analysis.lean}`);
+console.log(`  Lean: ${analysis.lean} | Confidence: ${analysis.confidence}`);
 const edge = detectEdge(analysis.lean, odds, venue);
 if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
-if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds) {
+const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
+if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
   logPick(today, `${away} @ ${home}`, analysis.lean, edge.label, odds);
 }
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
 
-    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score });
+    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score, confidence: analysis.confidence });
   }
 
   // Leaderboard
@@ -746,7 +851,7 @@ if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds) 
   } else {
     actionable.forEach((r, i) => {
       const line = r.odds ? `Line ${r.odds.total} | Over ${r.odds.overJuice} / Under ${r.odds.underJuice}` : 'No odds';
-      console.log(`${i + 1}. ${r.lean.padEnd(14)} — ${r.game} | ${line}`);
+      console.log(`${i + 1}. ${r.lean.padEnd(14)} (${r.confidence.padEnd(6)}) — ${r.game} | ${line}`);
     });
   }
 
