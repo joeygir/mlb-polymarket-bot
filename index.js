@@ -1,5 +1,193 @@
 require('dotenv').config();
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+
+const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
+const CSV_HEADERS = ['Date','Game','Lean','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
+
+function parseCSV(content) {
+  const lines = content.trim().split('\n').filter(Boolean);
+  if (lines.length < 1) return { headers: CSV_HEADERS, rows: [] };
+  const headers = lines[0].split(',').map(h => h.trim());
+  const rows = lines.slice(1).map(line => {
+    const fields = [];
+    let cur = '';
+    let inQ = false;
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { fields.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    fields.push(cur);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = (fields[i] || '').trim(); });
+    return obj;
+  }).filter(r => r.Date);
+  return { headers, rows };
+}
+
+function rowToCSV(row, headers) {
+  return headers.map(h => {
+    const v = row[h] != null ? String(row[h]) : '';
+    return v.includes(',') || v.includes('"') ? `"${v}"` : v;
+  }).join(',');
+}
+
+const OVER_LEANS = ['STRONG OVER','OVER','LEAN OVER','TILT OVER','DOME — LEAN OVER'];
+
+function logPick(date, game, lean, edgeLabel, odds) {
+  const isOver = OVER_LEANS.includes(lean);
+  const side = isOver ? 'OVER' : 'UNDER';
+  const sideJuice = isOver ? odds.overJuice : odds.underJuice;
+
+  if (!fs.existsSync(PICKS_LOG)) {
+    const row = { Date: date, Game: game, Lean: lean, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '' };
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rowToCSV(row, CSV_HEADERS) + '\n');
+    return;
+  }
+
+  const { headers, rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+
+  if (rows.some(r => r.Date === date && r.Game === game)) return;
+
+  const hasNewFormat = headers.includes('Side');
+  const newRow = { Date: date, Game: game, Lean: lean, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '' };
+
+  if (!hasNewFormat) {
+    const migrated = rows.map(r => ({ ...r, Side: OVER_LEANS.includes(r.Lean) ? 'OVER' : 'UNDER' }));
+    migrated.push(newRow);
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + migrated.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
+  } else {
+    fs.appendFileSync(PICKS_LOG, rowToCSV(newRow, CSV_HEADERS) + '\n');
+  }
+}
+
+function calcPnL(hitMiss, sideJuice, stake) {
+  if (hitMiss === 'PUSH') return 0;
+  const juice = parseInt(sideJuice);
+  const unit = parseFloat(stake) > 0 ? parseFloat(stake) : 10;
+  if (hitMiss === 'HIT') return juice < 0 ? +(unit * 100 / Math.abs(juice)).toFixed(2) : +(unit * juice / 100).toFixed(2);
+  return -unit;
+}
+
+function setStake(game, amount, date) {
+  if (!fs.existsSync(PICKS_LOG)) { console.log('picks_log.csv not found.'); return; }
+
+  const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+  const matches = rows.filter(r => r.Game.toLowerCase().includes(game.toLowerCase()) && (!date || r.Date === date));
+
+  if (matches.length === 0) { console.log(`No pick found matching "${game}"${date ? ` on ${date}` : ''}.`); return; }
+  if (matches.length > 1) {
+    console.log(`Multiple picks match "${game}" — specify a date:`);
+    matches.forEach(r => console.log(`  ${r.Date} — ${r.Game}`));
+    return;
+  }
+
+  matches[0].Stake = amount.toString();
+  fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rows.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
+  console.log(`Set stake of $${amount} on ${matches[0].Date} — ${matches[0].Game}`);
+}
+
+async function fetchFinalScores(date) {
+  try {
+    const res = await axios.get(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${date}&hydrate=linescore,team`);
+    const games = res.data.dates[0]?.games || [];
+    const scoreMap = {};
+    for (const g of games) {
+      if (g.status.abstractGameState !== 'Final') continue;
+      const key = `${g.teams.away.team.name} @ ${g.teams.home.team.name}`;
+      const awayRuns = g.teams.away.score;
+      const homeRuns = g.teams.home.score;
+      if (awayRuns != null && homeRuns != null) scoreMap[key] = awayRuns + homeRuns;
+    }
+    return scoreMap;
+  } catch {
+    return {};
+  }
+}
+
+async function updateResults() {
+  if (!fs.existsSync(PICKS_LOG)) { console.log('picks_log.csv not found.'); return; }
+
+  const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+  const pending = rows.filter(r => !r.Result);
+  if (pending.length === 0) { console.log('No pending results to update.'); return; }
+
+  const byDate = {};
+  for (const r of pending) { (byDate[r.Date] = byDate[r.Date] || []).push(r); }
+
+  let updated = 0;
+  for (const [date, dateRows] of Object.entries(byDate)) {
+    const scores = await fetchFinalScores(date);
+    for (const row of dateRows) {
+      const total = scores[row.Game];
+      if (total == null) { console.log(`  No final score: ${row.Game} on ${date}`); continue; }
+      const line = parseFloat(row.Total_Line);
+      const result = total > line ? 'OVER' : total < line ? 'UNDER' : 'PUSH';
+      const hitMiss = result === 'PUSH' ? 'PUSH' : result === row.Side ? 'HIT' : 'MISS';
+      const pnl = calcPnL(hitMiss, row.Side_Juice, row.Stake);
+      const target = rows.find(r => r.Date === date && r.Game === row.Game);
+      target.Result = result;
+      target.Hit_Miss = hitMiss;
+      target.PnL = pnl.toString();
+      updated++;
+      console.log(`  ${row.Game} (${date}) — ${total} runs vs line ${line} → ${result} → ${hitMiss} (${pnl >= 0 ? '+' : ''}${pnl})`);
+    }
+  }
+
+  if (updated > 0) {
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rows.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
+    console.log(`\nUpdated ${updated} row(s) in picks_log.csv`);
+  }
+}
+
+function printSummary() {
+  if (!fs.existsSync(PICKS_LOG)) { console.log('picks_log.csv not found.'); return; }
+
+  const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+  const resolved = rows.filter(r => r.Hit_Miss && r.Hit_Miss !== 'PUSH');
+  const total = resolved.length;
+  const hits = resolved.filter(r => r.Hit_Miss === 'HIT').length;
+  const totalPnL = resolved.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+
+  console.log('\n============================');
+  console.log(' PERFORMANCE SUMMARY');
+  console.log('============================\n');
+  console.log(`Total picks logged : ${rows.length}`);
+  console.log(`Resolved picks     : ${total}`);
+  console.log(`Overall hit rate   : ${hits}/${total} (${total > 0 ? (hits/total*100).toFixed(1) : '0.0'}%)`);
+  console.log(`Total P&L          : ${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}`);
+
+  console.log('\nBy Edge Label:');
+  for (const label of ['PRIME TARGET', 'TARGET']) {
+    const g = resolved.filter(r => r.Edge_Label === label);
+    const gHits = g.filter(r => r.Hit_Miss === 'HIT').length;
+    const gPnL = g.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+    console.log(`  ${label.padEnd(13)}: ${gHits}/${g.length} (${g.length > 0 ? (gHits/g.length*100).toFixed(1) : '0.0'}%) | P&L: ${gPnL >= 0 ? '+' : ''}${gPnL.toFixed(2)}`);
+  }
+
+  console.log('\nBy Lean:');
+  const leanOrder = ['STRONG OVER','OVER','LEAN OVER','TILT OVER','STRONG UNDER','UNDER','LEAN UNDER','TILT UNDER'];
+  for (const lean of leanOrder) {
+    const g = resolved.filter(r => r.Lean === lean);
+    if (g.length === 0) continue;
+    const gHits = g.filter(r => r.Hit_Miss === 'HIT').length;
+    const gPnL = g.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+    console.log(`  ${lean.padEnd(14)}: ${gHits}/${g.length} (${(gHits/g.length*100).toFixed(1)}%) | P&L: ${gPnL >= 0 ? '+' : ''}${gPnL.toFixed(2)}`);
+  }
+
+  const sorted = [...resolved].sort((a, b) => a.Date.localeCompare(b.Date));
+  let streakType = null, streakCount = 0;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const hm = sorted[i].Hit_Miss;
+    if (!streakType) { streakType = hm; streakCount = 1; }
+    else if (hm === streakType) { streakCount++; }
+    else break;
+  }
+  console.log(`\nCurrent streak     : ${streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? 'S' : ''}` : 'None'}`);
+  console.log('\n============================\n');
+}
 
 const STADIUMS = {
   'Wrigley Field':                    { lat: 41.9484, lon: -87.6553, outDirs: ['S','SW','SSW','SE','SSE'] },
@@ -33,6 +221,45 @@ const STADIUMS = {
   'Minute Maid Park':                 { lat: 29.7573, lon: -95.3555, outDirs: null },
   'Tropicana Field':                  { lat: 27.7682, lon: -82.6534, outDirs: null },
   'Rogers Centre':                    { lat: 43.6414, lon: -79.3894, outDirs: null },
+  'Angel Stadium':                    { lat: 33.8003, lon: -117.8827, outDirs: ['N','NW','NNW','NE','NNE'] },
+  'Rate Field':                       { lat: 41.8300, lon: -87.6339, outDirs: ['S','SW','SSW','SE','SSE'] },
+};
+
+// weatherWeight tiers: HIGH reliability -> 1.0, MEDIUM -> 0.6, LOW -> 0.3
+const STADIUM_NOTES = {
+  'Wrigley Field':                  { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, notes: 'Wind swirls unpredictably around the bleachers and off Lake Michigan; forecast direction often disagrees with in-stadium wind.' },
+  'Fenway Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Green Monster and tight urban footprint can deflect wind away from official station readings.' },
+  'Yankee Stadium':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open bowl design — wind tracks forecast closely.' },
+  'UNIQLO Field at Dodger Stadium': { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
+  'Dodger Stadium':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
+  'Oracle Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Bay-driven wind off McCovey Cove can shift quickly within a game.' },
+  'Coors Field':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 2, roofRetractable: false, notes: 'Altitude (5,200ft) is the dominant scoring factor — wind is secondary.' },
+  'T-Mobile Park':                  { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof affects in-stadium wind even when open — verify roof status before betting.' },
+  'Comerica Park':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open outfield design — wind tracks forecast closely.' },
+  'PNC Park':                       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'River-side open design — wind tracks forecast closely.' },
+  'Busch Stadium':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open bowl — wind generally matches forecast.' },
+  'Truist Park':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open concourse design — wind tracks forecast closely.' },
+  'Great American Ball Park':       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'River-side open park — wind tracks forecast closely.' },
+  'Guaranteed Rate Field':          { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally matches forecast.' },
+  'Camden Yards':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Warehouse beyond right field can create swirl that forecast wind direction misses.' },
+  'Nationals Park':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open riverside design — wind tracks forecast closely.' },
+  'Citi Field':                     { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally reliable versus forecast.' },
+  'Kauffman Stadium':               { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open bowl — wind tracks forecast closely.' },
+  'Target Field':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Gusty conditions off the Minneapolis skyline can diverge from forecast readings.' },
+  'Sutter Health Park':             { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Minor-league park in the Sacramento delta — prone to erratic gusts not captured by forecast.' },
+  'Petco Park':                     { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Marine layer and bay proximity can shift wind quickly within a game.' },
+  'Progressive Field':              { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally matches forecast.' },
+  'loanDepot park':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Low-slung enclosed bowl plus retractable roof — surface wind rarely matches forecast even when open. Verify roof status before betting.' },
+  'Daikin Park':                    { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed, unreliable versus forecast when open. Verify roof status before betting.' },
+  'Citizens Bank Park':             { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Wind direction/speed commonly shifts between the morning forecast and first pitch — recheck closer to game time.' },
+  'American Family Field':          { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Chase Field':                    { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Globe Life Field':               { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Minute Maid Park':               { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Tropicana Field':                { windReliability: 'LOW',    weatherWeight: 0.0, altitudeBoost: 0, roofRetractable: false, notes: 'Fixed dome, roof does not open — weather and wind are always irrelevant.' },
+  'Rogers Centre':                  { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Angel Stadium':                  { windReliability: 'MEDIUM', weatherWeight: 0.7, altitudeBoost: 0, roofRetractable: false, notes: 'Open design with nearby hills — wind generally tracks forecast but can shift moderately.' },
+  'Rate Field':                     { windReliability: 'HIGH',   weatherWeight: 0.8, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally matches forecast.' },
 };
 
 const CROSSWIND_DIRS = {
@@ -265,22 +492,41 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
   const isIn = !isOut && !isCross;
 
+  const stadiumNotes = STADIUM_NOTES[venue];
+  const weatherWeight = stadiumNotes?.weatherWeight ?? 1.0;
+  let windOverScore = 0;
+  let windUnderScore = 0;
+
   if (maxWind >= 15 && isOut) {
     signals.push(`Wind OUT at ${maxWind}mph ${windDir} — ball carries, HR risk up`);
-    overScore += 2;
+    windOverScore += 2;
   } else if (maxWind >= 10 && isOut) {
     signals.push(`Wind OUT at ${maxWind}mph ${windDir} — mild carry boost`);
-    overScore += 1;
+    windOverScore += 1;
   } else if (maxWind >= 15 && isIn) {
     signals.push(`Wind IN at ${maxWind}mph ${windDir} — fly balls die, pitchers favored`);
-    underScore += 2;
+    windUnderScore += 2;
   } else if (maxWind >= 10 && isIn) {
     signals.push(`Wind IN at ${maxWind}mph ${windDir} — mild suppression`);
-    underScore += 1;
+    windUnderScore += 1;
   } else if (maxWind >= 10) {
     signals.push(`Crosswind at ${maxWind}mph ${windDir} — minimal scoring effect`);
   } else {
     signals.push(`Calm wind at ${maxWind}mph — no wind edge`);
+  }
+
+  overScore += Math.round(windOverScore * weatherWeight);
+  underScore += Math.round(windUnderScore * weatherWeight);
+
+  if (stadiumNotes?.windReliability === 'LOW') {
+    signals.push(`⚠️ WIND UNRELIABLE — ${stadiumNotes.notes}`);
+  } else if (stadiumNotes?.windReliability === 'MEDIUM') {
+    signals.push(`⚡ VERIFY WIND — ${stadiumNotes.notes}`);
+  }
+
+  if (stadiumNotes?.altitudeBoost) {
+    overScore += stadiumNotes.altitudeBoost;
+    signals.push(`Altitude effect at ${venue} — +${stadiumNotes.altitudeBoost} OVER boost regardless of wind direction`);
   }
 
   if (avgTemp >= 90) {
@@ -331,7 +577,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
 
   return { lean, signals, score };
 }
-function detectEdge(lean, odds) {
+function detectEdge(lean, odds, venue) {
   if (!odds || lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
     return null;
   }
@@ -361,6 +607,9 @@ function detectEdge(lean, odds) {
   }
 
   if (marketDisagrees && isStrong) {
+    if (STADIUM_NOTES[venue]?.windReliability === 'LOW') {
+      return { label: 'TARGET', reason: `Downgraded from PRIME TARGET — wind data unreliable at this park (${STADIUM_NOTES[venue].notes}) — maximum gap (${odds.overJuice}/${odds.underJuice})` };
+    }
     return { label: 'PRIME TARGET', reason: `Bot strongly disagrees with market direction — maximum gap (${odds.overJuice}/${odds.underJuice})` };
   }
 
@@ -472,8 +721,11 @@ async function getTodayGames() {
       console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
     }console.log(`  Line: ${oddsLine}`);
 console.log(`  Lean: ${analysis.lean}`);
-const edge = detectEdge(analysis.lean, odds);
+const edge = detectEdge(analysis.lean, odds, venue);
 if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
+if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds) {
+  logPick(today, `${away} @ ${home}`, analysis.lean, edge.label, odds);
+}
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
 
@@ -502,4 +754,15 @@ if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
   console.log(`============================\n`);
 }
 
-getTodayGames();
+const args = process.argv.slice(2);
+if (args.includes('--update-results')) {
+  updateResults().then(() => process.exit(0));
+} else if (args.includes('--summary')) {
+  printSummary();
+} else if (args.includes('--stake')) {
+  const i = args.indexOf('--stake');
+  const [game, amount, date] = args.slice(i + 1);
+  setStake(game, amount, date);
+} else {
+  getTodayGames();
+}

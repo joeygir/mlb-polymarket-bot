@@ -1,5 +1,175 @@
 require('dotenv').config();
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+
+const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
+const CSV_HEADERS = ['Date','Game','Lean','Edge_Label','Total_Line','Side','Side_Juice','Result','Hit_Miss','PnL'];
+
+function parseCSV(content) {
+  const lines = content.trim().split('\n').filter(Boolean);
+  if (lines.length < 1) return { headers: CSV_HEADERS, rows: [] };
+  const headers = lines[0].split(',').map(h => h.trim());
+  const rows = lines.slice(1).map(line => {
+    const fields = [];
+    let cur = '';
+    let inQ = false;
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { fields.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    fields.push(cur);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = (fields[i] || '').trim(); });
+    return obj;
+  }).filter(r => r.Date);
+  return { headers, rows };
+}
+
+function rowToCSV(row, headers) {
+  return headers.map(h => {
+    const v = row[h] != null ? String(row[h]) : '';
+    return v.includes(',') || v.includes('"') ? `"${v}"` : v;
+  }).join(',');
+}
+
+const OVER_LEANS = ['STRONG OVER','OVER','LEAN OVER','TILT OVER','DOME — LEAN OVER'];
+
+function logPick(date, game, lean, edgeLabel, odds) {
+  const isOver = OVER_LEANS.includes(lean);
+  const side = isOver ? 'OVER' : 'UNDER';
+  const sideJuice = isOver ? odds.overJuice : odds.underJuice;
+
+  if (!fs.existsSync(PICKS_LOG)) {
+    const row = { Date: date, Game: game, Lean: lean, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Result: '', Hit_Miss: '', PnL: '' };
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rowToCSV(row, CSV_HEADERS) + '\n');
+    return;
+  }
+
+  const { headers, rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+
+  if (rows.some(r => r.Date === date && r.Game === game)) return;
+
+  const hasNewFormat = headers.includes('Side');
+  const newRow = { Date: date, Game: game, Lean: lean, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Result: '', Hit_Miss: '', PnL: '' };
+
+  if (!hasNewFormat) {
+    const migrated = rows.map(r => ({ ...r, Side: OVER_LEANS.includes(r.Lean) ? 'OVER' : 'UNDER' }));
+    migrated.push(newRow);
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + migrated.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
+  } else {
+    fs.appendFileSync(PICKS_LOG, rowToCSV(newRow, CSV_HEADERS) + '\n');
+  }
+}
+
+function calcPnL(hitMiss, sideJuice) {
+  if (hitMiss === 'PUSH') return 0;
+  const juice = parseInt(sideJuice);
+  const unit = 10;
+  if (hitMiss === 'HIT') return juice < 0 ? +(unit * 100 / Math.abs(juice)).toFixed(2) : +(unit * juice / 100).toFixed(2);
+  return -unit;
+}
+
+async function fetchFinalScores(date) {
+  try {
+    const res = await axios.get(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${date}&hydrate=linescore,team`);
+    const games = res.data.dates[0]?.games || [];
+    const scoreMap = {};
+    for (const g of games) {
+      if (g.status.abstractGameState !== 'Final') continue;
+      const key = `${g.teams.away.team.name} @ ${g.teams.home.team.name}`;
+      const awayRuns = g.teams.away.score;
+      const homeRuns = g.teams.home.score;
+      if (awayRuns != null && homeRuns != null) scoreMap[key] = awayRuns + homeRuns;
+    }
+    return scoreMap;
+  } catch {
+    return {};
+  }
+}
+
+async function updateResults() {
+  if (!fs.existsSync(PICKS_LOG)) { console.log('picks_log.csv not found.'); return; }
+
+  const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+  const pending = rows.filter(r => !r.Result);
+  if (pending.length === 0) { console.log('No pending results to update.'); return; }
+
+  const byDate = {};
+  for (const r of pending) { (byDate[r.Date] = byDate[r.Date] || []).push(r); }
+
+  let updated = 0;
+  for (const [date, dateRows] of Object.entries(byDate)) {
+    const scores = await fetchFinalScores(date);
+    for (const row of dateRows) {
+      const total = scores[row.Game];
+      if (total == null) { console.log(`  No final score: ${row.Game} on ${date}`); continue; }
+      const line = parseFloat(row.Total_Line);
+      const result = total > line ? 'OVER' : total < line ? 'UNDER' : 'PUSH';
+      const hitMiss = result === 'PUSH' ? 'PUSH' : result === row.Side ? 'HIT' : 'MISS';
+      const pnl = calcPnL(hitMiss, row.Side_Juice);
+      const target = rows.find(r => r.Date === date && r.Game === row.Game);
+      target.Result = result;
+      target.Hit_Miss = hitMiss;
+      target.PnL = pnl.toString();
+      updated++;
+      console.log(`  ${row.Game} (${date}) — ${total} runs vs line ${line} → ${result} → ${hitMiss} (${pnl >= 0 ? '+' : ''}${pnl})`);
+    }
+  }
+
+  if (updated > 0) {
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rows.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
+    console.log(`\nUpdated ${updated} row(s) in picks_log.csv`);
+  }
+}
+
+function printSummary() {
+  if (!fs.existsSync(PICKS_LOG)) { console.log('picks_log.csv not found.'); return; }
+
+  const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+  const resolved = rows.filter(r => r.Hit_Miss && r.Hit_Miss !== 'PUSH');
+  const total = resolved.length;
+  const hits = resolved.filter(r => r.Hit_Miss === 'HIT').length;
+  const totalPnL = resolved.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+
+  console.log('\n============================');
+  console.log(' PERFORMANCE SUMMARY');
+  console.log('============================\n');
+  console.log(`Total picks logged : ${rows.length}`);
+  console.log(`Resolved picks     : ${total}`);
+  console.log(`Overall hit rate   : ${hits}/${total} (${total > 0 ? (hits/total*100).toFixed(1) : '0.0'}%)`);
+  console.log(`Total P&L          : ${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}`);
+
+  console.log('\nBy Edge Label:');
+  for (const label of ['PRIME TARGET', 'TARGET']) {
+    const g = resolved.filter(r => r.Edge_Label === label);
+    const gHits = g.filter(r => r.Hit_Miss === 'HIT').length;
+    const gPnL = g.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+    console.log(`  ${label.padEnd(13)}: ${gHits}/${g.length} (${g.length > 0 ? (gHits/g.length*100).toFixed(1) : '0.0'}%) | P&L: ${gPnL >= 0 ? '+' : ''}${gPnL.toFixed(2)}`);
+  }
+
+  console.log('\nBy Lean:');
+  const leanOrder = ['STRONG OVER','OVER','LEAN OVER','TILT OVER','STRONG UNDER','UNDER','LEAN UNDER','TILT UNDER'];
+  for (const lean of leanOrder) {
+    const g = resolved.filter(r => r.Lean === lean);
+    if (g.length === 0) continue;
+    const gHits = g.filter(r => r.Hit_Miss === 'HIT').length;
+    const gPnL = g.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+    console.log(`  ${lean.padEnd(14)}: ${gHits}/${g.length} (${(gHits/g.length*100).toFixed(1)}%) | P&L: ${gPnL >= 0 ? '+' : ''}${gPnL.toFixed(2)}`);
+  }
+
+  const sorted = [...resolved].sort((a, b) => a.Date.localeCompare(b.Date));
+  let streakType = null, streakCount = 0;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const hm = sorted[i].Hit_Miss;
+    if (!streakType) { streakType = hm; streakCount = 1; }
+    else if (hm === streakType) { streakCount++; }
+    else break;
+  }
+  console.log(`\nCurrent streak     : ${streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? 'S' : ''}` : 'None'}`);
+  console.log('\n============================\n');
+}
 
 const STADIUMS = {
   'Wrigley Field':                    { lat: 41.9484, lon: -87.6553, outDirs: ['S','SW','SSW','SE','SSE'] },
@@ -26,6 +196,7 @@ const STADIUMS = {
   'Progressive Field':                { lat: 41.4962, lon: -81.6852, outDirs: ['S','SW','SSW','SE','SSE'] },
   'loanDepot park':                   { lat: 25.7781, lon: -80.2197, outDirs: ['E','NE','ENE','SE','ESE'] },
   'Daikin Park':                      { lat: 29.7573, lon: -95.3555, outDirs: ['S','SW','SSW','SE','SSE'] },
+  'Citizens Bank Park':               { lat: 39.9061, lon: -75.1665, outDirs: ['N','NW','NNW','NE','NNE'] },
   'American Family Field':            { lat: 43.0280, lon: -87.9712, outDirs: null },
   'Chase Field':                      { lat: 33.4453, lon: -112.0667, outDirs: null },
   'Globe Life Field':                 { lat: 32.7473, lon: -97.0845, outDirs: null },
@@ -43,6 +214,22 @@ const CROSSWIND_DIRS = {
   'Truist Park':            ['N','S','NNE','SSW','NNW','SSE'],
   'Camden Yards':           ['N','S','NNE','SSW','NNW','SSE'],
   'Citi Field':             ['N','S','NNE','SSW','NNW','SSE'],
+};
+
+const LEAN_RANK = {
+  'STRONG OVER': 6,
+  'OVER': 5,
+  'LEAN OVER': 4,
+  'TILT OVER': 3,
+  'STRONG UNDER': 6,
+  'UNDER': 5,
+  'LEAN UNDER': 4,
+  'TILT UNDER': 3,
+  'AVOID': 2,
+  'NEUTRAL': 0,
+  'DOME — NEUTRAL': 0,
+  'DOME — LEAN OVER': 3,
+  'DOME — LEAN UNDER': 3,
 };
 
 async function getPitcherStats(pitcherName) {
@@ -209,7 +396,7 @@ function scoreLineup(hitters, label) {
 
 function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters) {
   const stadium = STADIUMS[venue];
-  if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [] };
+  if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [], score: 0 };
 
   if (!stadium.outDirs) {
     const signals = ['Weather irrelevant — dome'];
@@ -234,10 +421,10 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
     let lean = 'DOME — NEUTRAL';
     if (score >= 2) lean = 'DOME — LEAN OVER';
     else if (score <= -2) lean = 'DOME — LEAN UNDER';
-    return { lean, signals };
+    return { lean, signals, score };
   }
 
-  if (!weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'] };
+  if (!weather) return { lean: 'NO DATA', signals: ['Could not fetch weather'], score: 0 };
 
   const { avgTemp, maxWind, windDir, condition } = weather;
   const signals = [];
@@ -285,7 +472,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   const rainKeywords = ['rain', 'shower', 'storm', 'thunderstorm', 'drizzle'];
   if (rainKeywords.some(k => condition.toLowerCase().includes(k))) {
     signals.push(`${condition} — postponement risk, avoid or wait`);
-    return { lean: 'AVOID', signals };
+    return { lean: 'AVOID', signals, score: 0 };
   }
 
   const windIsOut = isOut && maxWind >= 10;
@@ -312,9 +499,55 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   else if (score <= -4) lean = 'STRONG UNDER';
   else lean = 'NEUTRAL';
 
-  return { lean, signals };
+  return { lean, signals, score };
 }
+function detectEdge(lean, odds) {
+  if (!odds || lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
+    return null;
+  }
 
+  const isOverLean = ['STRONG OVER', 'OVER', 'LEAN OVER', 'TILT OVER', 'DOME — LEAN OVER'].includes(lean);
+  const isUnderLean = ['STRONG UNDER', 'UNDER', 'LEAN UNDER', 'TILT UNDER', 'DOME — LEAN UNDER'].includes(lean);
+  const isStrong = ['STRONG OVER', 'STRONG UNDER'].includes(lean);
+  const isMedium = ['OVER', 'UNDER', 'LEAN OVER', 'LEAN UNDER'].includes(lean);
+
+  const overJuice = parseInt(odds.overJuice);
+  const underJuice = parseInt(odds.underJuice);
+
+  const marketFavorsOver = overJuice < underJuice;
+  const marketFavorsUnder = underJuice < overJuice;
+
+  const relevantJuice = isOverLean ? overJuice : underJuice;
+  const marketAgrees = (isOverLean && marketFavorsOver) || (isUnderLean && marketFavorsUnder);
+  const marketDisagrees = (isOverLean && marketFavorsUnder) || (isUnderLean && marketFavorsOver);
+
+  // Juice thresholds
+  const juiceTooExpensive = relevantJuice < -130;
+  const juiceFair = relevantJuice >= -115;
+  const juiceNearEven = relevantJuice >= -108;
+
+  if (juiceTooExpensive) {
+    return { label: 'PASS', reason: `Market already priced this — juice too expensive (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketDisagrees && isStrong) {
+    return { label: 'PRIME TARGET', reason: `Bot strongly disagrees with market direction — maximum gap (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketDisagrees && isMedium) {
+    return { label: 'TARGET', reason: `Bot leans against market direction — gap exists (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketAgrees && juiceNearEven && isStrong) {
+    return { label: 'SHARP', reason: `Market agrees but juice still fair — strong signal at good price (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  if (marketAgrees && juiceFair) {
+    return { label: 'CONSIDER', reason: `Market agrees, price acceptable (${odds.overJuice}/${odds.underJuice})` };
+  }
+
+  return { label: 'PASS', reason: `Market agrees but juice not favorable enough (${odds.overJuice}/${odds.underJuice})` };
+}
 async function getOdds() {
   try {
     const res = await axios.get('https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/', {
@@ -335,14 +568,19 @@ async function getOdds() {
         if (!market) continue;
         const over = market.outcomes.find(o => o.name === 'Over');
         const under = market.outcomes.find(o => o.name === 'Under');
-        if (over && under) lines.push({ book: book.title, point: over.point, overPrice: over.price, underPrice: under.price });
+        if (over && under) lines.push({ point: over.point, overPrice: over.price, underPrice: under.price });
       }
       if (lines.length > 0) {
         const avgTotal = lines.reduce((a, b) => a + b.point, 0) / lines.length;
         const avgOver = lines.reduce((a, b) => a + b.overPrice, 0) / lines.length;
         const avgUnder = lines.reduce((a, b) => a + b.underPrice, 0) / lines.length;
         const fmt = p => p > 0 ? `+${Math.round(p)}` : `${Math.round(p)}`;
-        oddsMap[key] = `O/U ${avgTotal.toFixed(1)} | Over ${fmt(avgOver)} / Under ${fmt(avgUnder)} (avg of ${lines.length} books)`;
+        oddsMap[key] = {
+          display: `O/U ${avgTotal.toFixed(1)} | Over ${fmt(avgOver)} / Under ${fmt(avgUnder)} (avg of ${lines.length} books)`,
+          total: avgTotal.toFixed(1),
+          overJuice: fmt(avgOver),
+          underJuice: fmt(avgUnder),
+        };
       }
     }
     return oddsMap;
@@ -360,6 +598,8 @@ async function getTodayGames() {
   console.log(`\n============================`);
   console.log(` MLB OVER/UNDER BOT — ${today}`);
   console.log(`============================\n`);
+
+  const results = [];
 
   for (const game of games) {
     const home = game.teams.home.team.name;
@@ -391,7 +631,8 @@ async function getTodayGames() {
     };
 
     const oddsKey = `${away}|${home}`;
-    const oddsLine = oddsMap[oddsKey] || 'No odds available';
+    const odds = oddsMap[oddsKey];
+    const oddsLine = odds?.display || 'No odds available';
 
     console.log(`${away} @ ${home}`);
     console.log(`  ${venue}`);
@@ -399,12 +640,46 @@ async function getTodayGames() {
     console.log(`  Home: ${fmtPitcher(homePitcher, homeStats)}`);
     if (weather && !analysis.lean.startsWith('DOME')) {
       console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
-    }
-    console.log(`  Line: ${oddsLine}`);
-    console.log(`  Lean: ${analysis.lean}`);
+    }console.log(`  Line: ${oddsLine}`);
+console.log(`  Lean: ${analysis.lean}`);
+const edge = detectEdge(analysis.lean, odds);
+if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
+if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds) {
+  logPick(today, `${away} @ ${home}`, analysis.lean, edge.label, odds);
+}
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
+
+    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score });
   }
+
+  // Leaderboard
+  const actionable = results
+    .filter(r => !['NEUTRAL', 'DOME — NEUTRAL', 'NO DATA', 'UNKNOWN VENUE'].includes(r.lean))
+    .sort((a, b) => (LEAN_RANK[b.lean] || 0) - (LEAN_RANK[a.lean] || 0));
+
+  console.log(`\n============================`);
+  console.log(` TODAY\'S TOP CALLS`);
+  console.log(`============================\n`);
+
+  if (actionable.length === 0) {
+    console.log('No strong signals today.');
+  } else {
+    actionable.forEach((r, i) => {
+      const line = r.odds ? `Line ${r.odds.total} | Over ${r.odds.overJuice} / Under ${r.odds.underJuice}` : 'No odds';
+      console.log(`${i + 1}. ${r.lean.padEnd(14)} — ${r.game} | ${line}`);
+    });
+  }
+
+  console.log(`\n(NEUTRAL and dome games with no lean hidden)`);
+  console.log(`============================\n`);
 }
 
-getTodayGames();
+const args = process.argv.slice(2);
+if (args.includes('--update-results')) {
+  updateResults().then(() => process.exit(0));
+} else if (args.includes('--summary')) {
+  printSummary();
+} else {
+  getTodayGames();
+}
