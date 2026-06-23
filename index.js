@@ -812,6 +812,94 @@ async function getOdds() {
   }
 }
 
+// --- Display-only narrative helpers ---------------------------------------
+// These re-derive plain-English explanations from the same raw inputs the
+// decision model already used. They duplicate a few of the model's display
+// thresholds (xERA/ERA bands, park factor cutoffs, OPS bands) purely for
+// presentation — same pattern as fmtPitcher's FB/GB classification — and
+// never touch scoring, signals, or the lean/confidence computed in analyzeGame.
+
+function narrativeDepth(lean) {
+  if (lean.includes('STRONG')) return 3;
+  if (lean === 'OVER' || lean === 'UNDER') return 2;
+  if (lean.includes('LEAN')) return 1;
+  return 0;
+}
+
+function pitcherFact(awayStats, homeStats, awayPitcher, homePitcher, isOverLean) {
+  const wantDir = isOverLean ? 'OVER' : 'UNDER';
+  const candidates = [];
+  for (const [side, name, stats] of [['Away', awayPitcher, awayStats], ['Home', homePitcher, homeStats]]) {
+    if (!stats) continue;
+    const usingXera = stats.xera != null;
+    const qualityStat = usingXera ? stats.xera : stats.era;
+    const qualityLabel = usingXera ? `${qualityStat.toFixed(2)} xERA (${stats.era.toFixed(2)} ERA)` : `${qualityStat.toFixed(2)} ERA`;
+    let dir = null, rank = 0;
+    if (qualityStat < 2.75) { dir = 'UNDER'; rank = 2; }
+    else if (qualityStat < 3.50) { dir = 'UNDER'; rank = 1; }
+    else if (qualityStat > 4.75) { dir = 'OVER'; rank = 2; }
+    if (dir === wantDir) candidates.push({ side, name, qualityLabel, rank, dir });
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.rank - a.rank);
+  const c = candidates[0];
+  return c.dir === 'UNDER'
+    ? `${c.side}'s ${c.name} has been excellent at ${c.qualityLabel}, keeping the lid on scoring.`
+    : `${c.side}'s ${c.name} has been hittable at ${c.qualityLabel}, opening the door for more runs.`;
+}
+
+function parkFactorFact(stadiumNotes, venue, isOverLean) {
+  const pf = stadiumNotes?.parkFactor;
+  if (pf == null) return null;
+  if (pf > 1.08 && isOverLean) return `${venue} is one of the more hitter-friendly parks in MLB (factor ${pf.toFixed(2)}).`;
+  if (pf < 0.95 && !isOverLean) return `${venue} suppresses scoring as a pitcher's park (factor ${pf.toFixed(2)}).`;
+  return null;
+}
+
+function windFact(weather, coords, stadiumNotes, venue, isOverLean) {
+  if (!weather || !coords?.outDirs) return null;
+  if (stadiumNotes?.windReliability !== 'HIGH') return null;
+  const { maxWind, windDir } = weather;
+  if (maxWind < 10) return null;
+  const isOut = coords.outDirs.includes(windDir);
+  const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
+  const isIn = !isOut && !isCross;
+  if (isOut && isOverLean) return `Wind is blowing out at ${maxWind}mph ${windDir}, giving the ball extra carry.`;
+  if (isIn && !isOverLean) return `Wind is blowing in at ${maxWind}mph ${windDir}, knocking down fly balls.`;
+  return null;
+}
+
+function opsFact(awayHitters, homeHitters, away, home, isOverLean) {
+  const wantDir = isOverLean ? 'OVER' : 'UNDER';
+  const dirOf = (ops) => ops == null ? null : ops > 0.780 ? 'OVER' : ops < 0.660 ? 'UNDER' : null;
+  for (const [team, hitters] of [[away, awayHitters], [home, homeHitters]]) {
+    if (!hitters) continue;
+    const { recentOps, seasonOps } = hitters;
+    const rd = dirOf(recentOps);
+    const sd = dirOf(seasonOps);
+    if (rd != null && rd === sd && rd === wantDir) {
+      const verb = wantDir === 'OVER' ? 'hot' : 'cold';
+      return `${team}'s lineup has been ${verb}, with a ${recentOps.toFixed(3)} OPS over the last 15 games and ${seasonOps.toFixed(3)} on the season.`;
+    }
+  }
+  return null;
+}
+
+function marketSentence(odds, isOverLean) {
+  if (!odds) return 'Market: No odds available.';
+  const overJuice = parseInt(odds.overJuice);
+  const underJuice = parseInt(odds.underJuice);
+  if (overJuice === underJuice) {
+    return `Market: The market is split evenly on this total (${odds.overJuice}/${odds.underJuice}).`;
+  }
+  const marketFavorsOver = overJuice < underJuice;
+  const marketAgrees = isOverLean ? marketFavorsOver : !marketFavorsOver;
+  const marketSide = marketFavorsOver ? 'over' : 'under';
+  return marketAgrees
+    ? `Market: The market also favors the ${marketSide} (${odds.overJuice}/${odds.underJuice}), agreeing with the bot's lean.`
+    : `Market: The market favors the ${marketSide} (${odds.overJuice}/${odds.underJuice}), conflicting with the bot's lean.`;
+}
+
 async function getTodayGames() {
   const today = new Date().toISOString().split('T')[0];
   const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team`;
@@ -851,62 +939,80 @@ async function getTodayGames() {
 
     const analysis = analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters, awayBullpen, homeBullpen);
 
-    const fmtPitcher = (name, stats) => {
-      if (!stats) return `${name} (no stats)`;
-      const type = stats.groundOutsToAirouts < 0.9 ? 'FB' : stats.groundOutsToAirouts > 1.2 ? 'GB' : 'Neutral';
-      return `${name} — ERA: ${stats.era.toFixed(2)}, WHIP: ${stats.whip.toFixed(2)}, K/9: ${stats.strikeoutsPer9Inn.toFixed(1)}, BB/9: ${stats.walksPer9Inn.toFixed(1)}, ${type}`;
-    };
-
-    const fmtBullpen = (side, bullpen) => {
-      if (!bullpen || bullpen.era == null) return `${side} bullpen: no data`;
-      return `${side} bullpen: ERA ${bullpen.era.toFixed(2)}, WHIP ${bullpen.whip.toFixed(2)}`;
-    };
-
     const oddsKey = `${away}|${home}`;
     const odds = oddsMap[oddsKey];
-    const oddsLine = odds?.display || 'No odds available';
+    const stadiumNotes = STADIUM_NOTES[venue];
+    const isOverLean = OVER_LEANS.includes(analysis.lean);
+    const edge = detectEdge(analysis.lean, odds, venue);
 
-    console.log(`${away} @ ${home}`);
-    console.log(`  ${venue}`);
-    console.log(`  Away: ${fmtPitcher(awayPitcher, awayStats)}`);
-    console.log(`  Home: ${fmtPitcher(homePitcher, homeStats)}`);
-    console.log(`  ${fmtBullpen('Away', awayBullpen)}`);
-    console.log(`  ${fmtBullpen('Home', homeBullpen)}`);
-    if (weather && !analysis.lean.startsWith('DOME')) {
-      console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
-    }console.log(`  Line: ${oddsLine}`);
-console.log(`  Lean: ${analysis.lean} | Confidence: ${analysis.confidence}`);
-const edge = detectEdge(analysis.lean, odds, venue);
-if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
-const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
-if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
-  logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds);
-}
-    analysis.signals.forEach(s => console.log(`   -> ${s}`));
-    console.log('---');
+    const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
+    if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
+      logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds);
+    }
 
-    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score, confidence: analysis.confidence });
+    const pf = stadiumNotes?.parkFactor;
+    const line1 = `${away} @ ${home} | ${venue} | Park Factor: ${pf != null ? pf.toFixed(2) : 'N/A'}`;
+    let line2 = null;
+    let leaderboardSentence = null;
+
+    console.log(line1);
+
+    if (analysis.lean === 'AVOID') {
+      console.log('Rain/storm risk — skip.');
+    } else {
+      const totalText = odds ? odds.total : 'N/A';
+      const leanJuice = odds ? (isOverLean ? odds.overJuice : odds.underJuice) : 'N/A';
+      const edgeLabelText = edge ? edge.label : 'No Edge';
+      line2 = `${analysis.lean} | ${edgeLabelText} | O/U ${totalText} | ${leanJuice}`;
+      console.log(line2);
+
+      const depth = narrativeDepth(analysis.lean);
+      if (depth > 0) {
+        const facts = [
+          pitcherFact(awayStats, homeStats, awayPitcher, homePitcher, isOverLean),
+          parkFactorFact(stadiumNotes, venue, isOverLean),
+          windFact(weather, coords, stadiumNotes, venue, isOverLean),
+          opsFact(awayHitters, homeHitters, away, home, isOverLean),
+        ].filter(Boolean);
+        const sentences = facts.slice(0, depth);
+        if (sentences.length) {
+          console.log(sentences.join(' '));
+          leaderboardSentence = sentences[0];
+        }
+        console.log(marketSentence(odds, isOverLean));
+      }
+    }
+
+    console.log('---\n');
+
+    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, leaderboardSentence });
   }
 
-  // Leaderboard
+  // Leaderboard — TARGET and PRIME TARGET calls only
   const actionable = results
-    .filter(r => !['NEUTRAL', 'DOME — NEUTRAL', 'NO DATA', 'UNKNOWN VENUE'].includes(r.lean))
-    .sort((a, b) => (LEAN_RANK[b.lean] || 0) - (LEAN_RANK[a.lean] || 0));
+    .filter(r => r.edge && (r.edge.label === 'TARGET' || r.edge.label === 'PRIME TARGET'))
+    .sort((a, b) => {
+      const rank = (r) => (r.edge.label === 'PRIME TARGET' ? 1 : 0);
+      if (rank(b) !== rank(a)) return rank(b) - rank(a);
+      return (LEAN_RANK[b.lean] || 0) - (LEAN_RANK[a.lean] || 0);
+    });
 
   console.log(`\n============================`);
   console.log(` TODAY\'S TOP CALLS`);
   console.log(`============================\n`);
 
   if (actionable.length === 0) {
-    console.log('No strong signals today.');
+    console.log('No TARGET or PRIME TARGET calls today.');
   } else {
-    actionable.forEach((r, i) => {
-      const line = r.odds ? `Line ${r.odds.total} | Over ${r.odds.overJuice} / Under ${r.odds.underJuice}` : 'No odds';
-      console.log(`${i + 1}. ${r.lean.padEnd(14)} (${r.confidence.padEnd(6)}) — ${r.game} | ${line}`);
+    actionable.forEach((r) => {
+      console.log(r.line1);
+      console.log(r.line2);
+      if (r.leaderboardSentence) console.log(r.leaderboardSentence);
+      console.log('');
     });
   }
 
-  console.log(`\n(NEUTRAL and dome games with no lean hidden)`);
+  console.log(`(Showing TARGET and PRIME TARGET calls only)`);
   console.log(`============================\n`);
 }
 
