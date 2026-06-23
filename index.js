@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
-const CSV_HEADERS = ['Date','Game','Lean','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
+const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
 
 function parseCSV(content) {
   const lines = content.trim().split('\n').filter(Boolean);
@@ -36,14 +36,14 @@ function rowToCSV(row, headers) {
 
 const OVER_LEANS = ['STRONG OVER','OVER','LEAN OVER','TILT OVER','DOME — LEAN OVER'];
 
-function logPick(date, game, lean, edgeLabel, odds) {
+function logPick(date, game, lean, confidence, edgeLabel, odds) {
   const isOver = OVER_LEANS.includes(lean);
   const side = isOver ? 'OVER' : 'UNDER';
   const sideJuice = isOver ? odds.overJuice : odds.underJuice;
+  const newRow = { Date: date, Game: game, Lean: lean, Confidence: confidence, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '' };
 
   if (!fs.existsSync(PICKS_LOG)) {
-    const row = { Date: date, Game: game, Lean: lean, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '' };
-    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rowToCSV(row, CSV_HEADERS) + '\n');
+    fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rowToCSV(newRow, CSV_HEADERS) + '\n');
     return;
   }
 
@@ -51,11 +51,15 @@ function logPick(date, game, lean, edgeLabel, odds) {
 
   if (rows.some(r => r.Date === date && r.Game === game)) return;
 
-  const hasNewFormat = headers.includes('Side');
-  const newRow = { Date: date, Game: game, Lean: lean, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '' };
+  const hasSide = headers.includes('Side');
+  const hasConfidence = headers.includes('Confidence');
 
-  if (!hasNewFormat) {
-    const migrated = rows.map(r => ({ ...r, Side: OVER_LEANS.includes(r.Lean) ? 'OVER' : 'UNDER' }));
+  if (!hasSide || !hasConfidence) {
+    const migrated = rows.map(r => ({
+      ...r,
+      Side: hasSide ? r.Side : (OVER_LEANS.includes(r.Lean) ? 'OVER' : 'UNDER'),
+      Confidence: hasConfidence ? r.Confidence : '',
+    }));
     migrated.push(newRow);
     fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + migrated.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
   } else {
@@ -177,6 +181,15 @@ function printSummary() {
     console.log(`  ${lean.padEnd(14)}: ${gHits}/${g.length} (${(gHits/g.length*100).toFixed(1)}%) | P&L: ${gPnL >= 0 ? '+' : ''}${gPnL.toFixed(2)}`);
   }
 
+  console.log('\nBy Confidence:');
+  for (const conf of ['HIGH', 'MEDIUM', 'LOW']) {
+    const g = resolved.filter(r => r.Confidence === conf);
+    if (g.length === 0) continue;
+    const gHits = g.filter(r => r.Hit_Miss === 'HIT').length;
+    const gPnL = g.reduce((s, r) => s + (parseFloat(r.PnL) || 0), 0);
+    console.log(`  ${conf.padEnd(7)}: ${gHits}/${g.length} (${(gHits/g.length*100).toFixed(1)}%) | P&L: ${gPnL >= 0 ? '+' : ''}${gPnL.toFixed(2)}`);
+  }
+
   const sorted = [...resolved].sort((a, b) => a.Date.localeCompare(b.Date));
   let streakType = null, streakCount = 0;
   for (let i = sorted.length - 1; i >= 0; i--) {
@@ -227,39 +240,39 @@ const STADIUMS = {
 
 // weatherWeight tiers: HIGH reliability -> 1.0, MEDIUM -> 0.6, LOW -> 0.3
 const STADIUM_NOTES = {
-  'Wrigley Field':                  { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, notes: 'Wind swirls unpredictably around the bleachers and off Lake Michigan; forecast direction often disagrees with in-stadium wind.' },
-  'Fenway Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Green Monster and tight urban footprint can deflect wind away from official station readings.' },
-  'Yankee Stadium':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open bowl design — wind tracks forecast closely.' },
-  'UNIQLO Field at Dodger Stadium': { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
-  'Dodger Stadium':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
-  'Oracle Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Bay-driven wind off McCovey Cove can shift quickly within a game.' },
-  'Coors Field':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 2, roofRetractable: false, notes: 'Altitude (5,200ft) is the dominant scoring factor — wind is secondary.' },
-  'T-Mobile Park':                  { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof affects in-stadium wind even when open — verify roof status before betting.' },
-  'Comerica Park':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open outfield design — wind tracks forecast closely.' },
-  'PNC Park':                       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'River-side open design — wind tracks forecast closely.' },
-  'Busch Stadium':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open bowl — wind generally matches forecast.' },
-  'Truist Park':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open concourse design — wind tracks forecast closely.' },
-  'Great American Ball Park':       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'River-side open park — wind tracks forecast closely.' },
-  'Guaranteed Rate Field':          { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally matches forecast.' },
-  'Camden Yards':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Warehouse beyond right field can create swirl that forecast wind direction misses.' },
-  'Nationals Park':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open riverside design — wind tracks forecast closely.' },
-  'Citi Field':                     { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally reliable versus forecast.' },
-  'Kauffman Stadium':               { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open bowl — wind tracks forecast closely.' },
-  'Target Field':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Gusty conditions off the Minneapolis skyline can diverge from forecast readings.' },
-  'Sutter Health Park':             { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Minor-league park in the Sacramento delta — prone to erratic gusts not captured by forecast.' },
-  'Petco Park':                     { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Marine layer and bay proximity can shift wind quickly within a game.' },
-  'Progressive Field':              { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally matches forecast.' },
-  'loanDepot park':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Low-slung enclosed bowl plus retractable roof — surface wind rarely matches forecast even when open. Verify roof status before betting.' },
-  'Daikin Park':                    { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed, unreliable versus forecast when open. Verify roof status before betting.' },
-  'Citizens Bank Park':             { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, notes: 'Wind direction/speed commonly shifts between the morning forecast and first pitch — recheck closer to game time.' },
-  'American Family Field':          { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
-  'Chase Field':                    { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
-  'Globe Life Field':               { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
-  'Minute Maid Park':               { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
-  'Tropicana Field':                { windReliability: 'LOW',    weatherWeight: 0.0, altitudeBoost: 0, roofRetractable: false, notes: 'Fixed dome, roof does not open — weather and wind are always irrelevant.' },
-  'Rogers Centre':                  { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
-  'Angel Stadium':                  { windReliability: 'MEDIUM', weatherWeight: 0.7, altitudeBoost: 0, roofRetractable: false, notes: 'Open design with nearby hills — wind generally tracks forecast but can shift moderately.' },
-  'Rate Field':                     { windReliability: 'HIGH',   weatherWeight: 0.8, altitudeBoost: 0, roofRetractable: false, notes: 'Open design — wind generally matches forecast.' },
+  'Wrigley Field':                  { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.05, notes: 'Wind swirls unpredictably around the bleachers and off Lake Michigan; forecast direction often disagrees with in-stadium wind.' },
+  'Fenway Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.08, notes: 'Green Monster and tight urban footprint can deflect wind away from official station readings.' },
+  'Yankee Stadium':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.10, notes: 'Open bowl design — wind tracks forecast closely.' },
+  'UNIQLO Field at Dodger Stadium': { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
+  'Dodger Stadium':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
+  'Oracle Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.94, notes: 'Bay-driven wind off McCovey Cove can shift quickly within a game.' },
+  'Coors Field':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 2, roofRetractable: false, parkFactor: 1.30, notes: 'Altitude (5,200ft) is the dominant scoring factor — wind is secondary.' },
+  'T-Mobile Park':                  { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: true,  parkFactor: 0.95, notes: 'Retractable roof affects in-stadium wind even when open — verify roof status before betting.' },
+  'Comerica Park':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.97, notes: 'Open outfield design — wind tracks forecast closely.' },
+  'PNC Park':                       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.04, notes: 'River-side open design — wind tracks forecast closely.' },
+  'Busch Stadium':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.00, notes: 'Open bowl — wind generally matches forecast.' },
+  'Truist Park':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.02, notes: 'Open concourse design — wind tracks forecast closely.' },
+  'Great American Ball Park':       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.12, notes: 'River-side open park — wind tracks forecast closely.' },
+  'Guaranteed Rate Field':          { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.99, notes: 'Open design — wind generally matches forecast.' },
+  'Camden Yards':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.07, notes: 'Warehouse beyond right field can create swirl that forecast wind direction misses.' },
+  'Nationals Park':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.00, notes: 'Open riverside design — wind tracks forecast closely.' },
+  'Citi Field':                     { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.98, notes: 'Open design — wind generally reliable versus forecast.' },
+  'Kauffman Stadium':               { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.01, notes: 'Open bowl — wind tracks forecast closely.' },
+  'Target Field':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.97, notes: 'Gusty conditions off the Minneapolis skyline can diverge from forecast readings.' },
+  'Sutter Health Park':             { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Minor-league park in the Sacramento delta — prone to erratic gusts not captured by forecast.' },
+  'Petco Park':                     { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.93, notes: 'Marine layer and bay proximity can shift wind quickly within a game.' },
+  'Progressive Field':              { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.98, notes: 'Open design — wind generally matches forecast.' },
+  'loanDepot park':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 0.97, notes: 'Low-slung enclosed bowl plus retractable roof — surface wind rarely matches forecast even when open. Verify roof status before betting.' },
+  'Daikin Park':                    { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 0.98, notes: 'Retractable roof — wind irrelevant when closed, unreliable versus forecast when open. Verify roof status before betting.' },
+  'Citizens Bank Park':             { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.06, notes: 'Wind direction/speed commonly shifts between the morning forecast and first pitch — recheck closer to game time.' },
+  'American Family Field':          { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 1.02, notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Chase Field':                    { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 1.04, notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Globe Life Field':               { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 1.01, notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Minute Maid Park':               { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 1.03, notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Tropicana Field':                { windReliability: 'LOW',    weatherWeight: 0.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Fixed dome, roof does not open — weather and wind are always irrelevant.' },
+  'Rogers Centre':                  { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: true,  parkFactor: 1.01, notes: 'Retractable roof — wind irrelevant when closed. Verify roof status before betting.' },
+  'Angel Stadium':                  { windReliability: 'MEDIUM', weatherWeight: 0.7, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Open design with nearby hills — wind generally tracks forecast but can shift moderately.' },
+  'Rate Field':                     { windReliability: 'HIGH',   weatherWeight: 0.8, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.99, notes: 'Open design — wind generally matches forecast.' },
 };
 
 const CROSSWIND_DIRS = {
@@ -505,23 +518,22 @@ function scoreBullpen(awayBullpen, homeBullpen) {
     const poorEra = bullpen.era != null && bullpen.era >= 4.50;
     const eliteEra = bullpen.era != null && bullpen.era < 3.20;
 
+    // At most one OVER signal per team — use the strongest applicable condition
+    // rather than stacking combined + individual rules on the same evidence.
     if (heavyLoad && poorEra) {
       add(`${side} bullpen fatigued AND poor bullpen — late innings highly vulnerable`, 'OVER', 2);
-    }
-    if (heavyLoad) {
+    } else if (heavyLoad) {
       add(`${side} heavy bullpen usage — fatigue risk`, 'OVER', 3);
-    }
-    if (poorEra) {
+    } else if (poorEra) {
       add(`${side} poor bullpen quality — late innings vulnerable`, 'OVER', 3);
     }
 
+    // At most one UNDER signal per team, same reasoning.
     if (freshLoad && eliteEra) {
       add(`${side} fresh elite bullpen — late innings locked down`, 'UNDER', 2);
-    }
-    if (eliteEra) {
+    } else if (eliteEra) {
       add(`${side} elite bullpen quality`, 'UNDER', 3);
-    }
-    if (freshLoad) {
+    } else if (freshLoad) {
       add(`${side} fresh bullpen arms available`, 'UNDER', 3);
     }
   }
@@ -679,6 +691,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   let overScore = 0;
   let underScore = 0;
   let windIsOut = false;
+  const stadiumNotes = STADIUM_NOTES[venue];
 
   const add = (text, direction, tier) => {
     signals.push(text);
@@ -693,6 +706,18 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
     underScore += result.underScore;
   };
 
+  // Tier 1 — park factor is a structural scoring environment signal, independent of weather/dome.
+  if (stadiumNotes?.parkFactor != null) {
+    const pf = stadiumNotes.parkFactor;
+    if (pf > 1.08) {
+      add(`Hitter-friendly park (factor ${pf.toFixed(2)})`, 'OVER', 1);
+    } else if (pf < 0.95) {
+      add(`Pitcher-friendly park (factor ${pf.toFixed(2)})`, 'UNDER', 1);
+    } else {
+      signals.push(`Park factor: ${pf.toFixed(2)}`);
+    }
+  }
+
   if (isDome) {
     signals.push('Weather irrelevant — dome');
   } else {
@@ -702,7 +727,6 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
     const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
     const isIn = !isOut && !isCross;
 
-    const stadiumNotes = STADIUM_NOTES[venue];
     // Wind direction at 10mph+ is Tier 1 only when the park's wind reliability is HIGH —
     // otherwise it's downgraded to Tier 3 supporting context (matches weatherWeight intent).
     const windTier = stadiumNotes?.windReliability === 'HIGH' ? 1 : 3;
@@ -958,7 +982,7 @@ const edge = detectEdge(analysis.lean, odds, venue);
 if (edge) console.log(`  Edge: ${edge.label} — ${edge.reason}`);
 const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
 if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
-  logPick(today, `${away} @ ${home}`, analysis.lean, edge.label, odds);
+  logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds);
 }
     analysis.signals.forEach(s => console.log(`   -> ${s}`));
     console.log('---');
