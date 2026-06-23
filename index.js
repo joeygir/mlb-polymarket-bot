@@ -414,6 +414,121 @@ async function getTeamHitters(teamId) {
   }
 }
 
+async function getBullpenWorkload(teamId) {
+  try {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 3);
+    const fmt = d => d.toISOString().split('T')[0];
+
+    const sched = await axios.get(
+      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=${teamId}&startDate=${fmt(start)}&endDate=${fmt(end)}`
+    );
+    const gamePks = (sched.data.dates || [])
+      .flatMap(d => d.games)
+      .filter(g => g.status?.abstractGameState === 'Final')
+      .map(g => g.gamePk);
+
+    let totalPitches = 0;
+    for (const gamePk of gamePks) {
+      try {
+        const box = await axios.get(`https://statsapi.mlb.com/api/v1/game/${gamePk}/boxscore`);
+        const side = box.data.teams.home.team.id === teamId ? box.data.teams.home : box.data.teams.away;
+        const pitcherIds = side.pitchers || [];
+        const starterId = pitcherIds[0];
+        for (const pid of pitcherIds) {
+          if (pid === starterId) continue;
+          const pitches = side.players?.[`ID${pid}`]?.stats?.pitching?.numberOfPitches;
+          if (pitches) totalPitches += pitches;
+        }
+      } catch {
+        // skip game on failure, keep summing the rest
+      }
+    }
+    return totalPitches;
+  } catch {
+    return null;
+  }
+}
+
+const bullpenCache = new Map();
+
+async function getBullpenStats(teamId, starterPlayerId) {
+  if (bullpenCache.has(teamId)) return bullpenCache.get(teamId);
+
+  let result = { era: null, whip: null, load: null };
+  try {
+    const [rosterRes, load] = await Promise.all([
+      axios.get(`https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active`),
+      getBullpenWorkload(teamId),
+    ]);
+
+    const relievers = rosterRes.data.roster.filter(p => p.position.code === '1' && p.person.id !== starterPlayerId);
+
+    const statLines = await Promise.all(relievers.map(p =>
+      axios.get(`https://statsapi.mlb.com/api/v1/people/${p.person.id}/stats?stats=season&season=${new Date().getFullYear()}&group=pitching`)
+        .then(res => res.data.stats?.[0]?.splits?.[0]?.stat)
+        .catch(() => null)
+    ));
+
+    const qualified = statLines.filter(s => s && parseFloat(s.inningsPitched) >= 5);
+    const era = qualified.length ? qualified.reduce((sum, s) => sum + parseFloat(s.era), 0) / qualified.length : null;
+    const whip = qualified.length ? qualified.reduce((sum, s) => sum + parseFloat(s.whip), 0) / qualified.length : null;
+
+    result = { era, whip, load };
+  } catch {
+    // keep defaults
+  }
+
+  bullpenCache.set(teamId, result);
+  return result;
+}
+
+function scoreBullpen(awayBullpen, homeBullpen) {
+  const signals = [];
+  const weighted = [];
+  let overScore = 0;
+  let underScore = 0;
+
+  const add = (text, direction, tier) => {
+    signals.push(text);
+    const weight = TIER_WEIGHTS[tier];
+    weighted.push({ direction, tier, weight });
+    if (direction === 'OVER') overScore += weight; else underScore += weight;
+  };
+
+  for (const [side, bullpen] of [['Away', awayBullpen], ['Home', homeBullpen]]) {
+    if (!bullpen) continue;
+
+    const heavyLoad = bullpen.load != null && bullpen.load >= 150;
+    const freshLoad = bullpen.load != null && bullpen.load < 60;
+    const poorEra = bullpen.era != null && bullpen.era >= 4.50;
+    const eliteEra = bullpen.era != null && bullpen.era < 3.20;
+
+    if (heavyLoad && poorEra) {
+      add(`${side} bullpen fatigued AND poor bullpen — late innings highly vulnerable`, 'OVER', 2);
+    }
+    if (heavyLoad) {
+      add(`${side} heavy bullpen usage — fatigue risk`, 'OVER', 3);
+    }
+    if (poorEra) {
+      add(`${side} poor bullpen quality — late innings vulnerable`, 'OVER', 3);
+    }
+
+    if (freshLoad && eliteEra) {
+      add(`${side} fresh elite bullpen — late innings locked down`, 'UNDER', 2);
+    }
+    if (eliteEra) {
+      add(`${side} elite bullpen quality`, 'UNDER', 3);
+    }
+    if (freshLoad) {
+      add(`${side} fresh bullpen arms available`, 'UNDER', 3);
+    }
+  }
+
+  return { overScore, underScore, signals, weighted };
+}
+
 async function getWeather(lat, lon) {
   try {
     const pointRes = await axios.get(`https://api.weather.gov/points/${lat},${lon}`);
@@ -552,7 +667,7 @@ function scoreLineup(hitters, label) {
   return { overScore, underScore, signals, weighted };
 }
 
-function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters) {
+function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters, awayBullpen, homeBullpen) {
   const stadium = STADIUMS[venue];
   if (!stadium) return { lean: 'UNKNOWN VENUE', signals: [], score: 0, confidence: 'N/A' };
 
@@ -656,6 +771,9 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   const homeLineup = scoreLineup(homeHitters, 'Home');
   merge(awayLineup);
   merge(homeLineup);
+
+  const bullpenResult = scoreBullpen(awayBullpen, homeBullpen);
+  merge(bullpenResult);
 
   const rawScore = overScore - underScore;
   const score = Math.round(rawScore / SCORE_NORMALIZATION);
@@ -792,25 +910,34 @@ async function getTodayGames() {
     const venue = game.venue.name;
     const homePitcher = game.teams.home.probablePitcher?.fullName || 'TBD';
     const awayPitcher = game.teams.away.probablePitcher?.fullName || 'TBD';
+    const homePitcherId = game.teams.home.probablePitcher?.id;
+    const awayPitcherId = game.teams.away.probablePitcher?.id;
     const coords = STADIUMS[venue];
 
     const weather = coords?.outDirs !== undefined && coords.outDirs !== null
       ? await getWeather(coords.lat, coords.lon)
       : null;
 
-    const [awayStats, homeStats, awayHitters, homeHitters] = await Promise.all([
+    const [awayStats, homeStats, awayHitters, homeHitters, awayBullpen, homeBullpen] = await Promise.all([
       getPitcherStats(awayPitcher),
       getPitcherStats(homePitcher),
       getTeamHitters(awayId),
       getTeamHitters(homeId),
+      getBullpenStats(awayId, awayPitcherId),
+      getBullpenStats(homeId, homePitcherId),
     ]);
 
-    const analysis = analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters);
+    const analysis = analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitters, awayBullpen, homeBullpen);
 
     const fmtPitcher = (name, stats) => {
       if (!stats) return `${name} (no stats)`;
       const type = stats.groundOutsToAirouts < 0.9 ? 'FB' : stats.groundOutsToAirouts > 1.2 ? 'GB' : 'Neutral';
       return `${name} — ERA: ${stats.era.toFixed(2)}, WHIP: ${stats.whip.toFixed(2)}, K/9: ${stats.strikeoutsPer9Inn.toFixed(1)}, BB/9: ${stats.walksPer9Inn.toFixed(1)}, ${type}`;
+    };
+
+    const fmtBullpen = (side, bullpen) => {
+      if (!bullpen || bullpen.era == null) return `${side} bullpen: no data`;
+      return `${side} bullpen: ERA ${bullpen.era.toFixed(2)}, WHIP ${bullpen.whip.toFixed(2)}, load ${bullpen.load ?? '?'} pitches (3 days)`;
     };
 
     const oddsKey = `${away}|${home}`;
@@ -821,6 +948,8 @@ async function getTodayGames() {
     console.log(`  ${venue}`);
     console.log(`  Away: ${fmtPitcher(awayPitcher, awayStats)}`);
     console.log(`  Home: ${fmtPitcher(homePitcher, homeStats)}`);
+    console.log(`  ${fmtBullpen('Away', awayBullpen)}`);
+    console.log(`  ${fmtBullpen('Home', homeBullpen)}`);
     if (weather && !analysis.lean.startsWith('DOME')) {
       console.log(`  ${weather.condition}, ${weather.avgTemp}F, Wind ${weather.maxWind}mph ${weather.windDir}`);
     }console.log(`  Line: ${oddsLine}`);
