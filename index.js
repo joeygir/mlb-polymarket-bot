@@ -835,7 +835,13 @@ const KALSHI_KEY_PATH = path.join(__dirname, 'kalshi_private_key.pem');
 let kalshiPrivateKeyCache = null;
 function getKalshiPrivateKey() {
   if (kalshiPrivateKeyCache) return kalshiPrivateKeyCache;
-  kalshiPrivateKeyCache = fs.readFileSync(KALSHI_KEY_PATH, 'utf8');
+  if (process.env.KALSHI_PRIVATE_KEY) {
+    // Hosts like Railway store multi-line PEM values with literal "\n" —
+    // normalize those to real newlines; a no-op if they're already real.
+    kalshiPrivateKeyCache = process.env.KALSHI_PRIVATE_KEY.replace(/\\n/g, '\n');
+  } else {
+    kalshiPrivateKeyCache = fs.readFileSync(KALSHI_KEY_PATH, 'utf8');
+  }
   return kalshiPrivateKeyCache;
 }
 
