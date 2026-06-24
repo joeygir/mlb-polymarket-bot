@@ -4,3 +4,4 @@ output.txt
 *.pem
 code.md
 today.md
+logs/

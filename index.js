@@ -1248,8 +1248,79 @@ async function getTodayGames(opts = {}) {
   console.log(`============================\n`);
 }
 
+// --- Daemon scheduler -------------------------------------------------------
+// `node index.js --daemon` keeps the process alive and triggers scheduled
+// runs at fixed UTC times: full analysis at 11:00 and 17:00 UTC (7am/1pm ET),
+// and --update-results at 04:00 UTC (midnight ET).
+
+const LOGS_DIR = path.join(__dirname, 'logs');
+const DAEMON_LOG_PATH = path.join(LOGS_DIR, 'daemon.log');
+
+const DAEMON_SCHEDULE = [
+  { hour: 11, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
+  { hour: 17, minute: 0, name: 'afternoon-analysis', task: () => getTodayGames() },
+  { hour: 4, minute: 0, name: 'update-results', task: () => updateResults() },
+];
+
+function appendDaemonLog(message) {
+  fs.appendFileSync(DAEMON_LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
+}
+
+// Runs a scheduled task, capturing everything it would normally print to the
+// console into its own timestamped file under logs/, while still printing to
+// the console as usual. Also records start/completion/failure in daemon.log.
+async function runScheduledTask(name, task) {
+  const timestamp = new Date().toISOString();
+  const runLogPath = path.join(LOGS_DIR, `${timestamp.replace(/[:.]/g, '-')}-${name}.log`);
+  const captured = [];
+
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...a) => { captured.push(a.join(' ')); originalLog(...a); };
+  console.error = (...a) => { captured.push('[ERROR] ' + a.join(' ')); originalError(...a); };
+
+  appendDaemonLog(`Starting ${name}`);
+  try {
+    await task();
+    appendDaemonLog(`Completed ${name}`);
+  } catch (err) {
+    captured.push(`[ERROR] ${err.message}`);
+    appendDaemonLog(`FAILED ${name}: ${err.message}`);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    fs.writeFileSync(runLogPath, captured.join('\n') + '\n');
+  }
+}
+
+function runDaemon() {
+  if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+
+  appendDaemonLog('Daemon started — schedule: 11:00 UTC (analysis), 17:00 UTC (analysis), 04:00 UTC (update-results)');
+  console.log('Daemon started. Checking schedule every 60s — 11:00 & 17:00 UTC (analysis), 04:00 UTC (update-results).');
+
+  let lastTriggeredKey = null;
+
+  setInterval(() => {
+    const now = new Date();
+    const hour = now.getUTCHours();
+    const minute = now.getUTCMinutes();
+
+    const match = DAEMON_SCHEDULE.find(s => s.hour === hour && s.minute === minute);
+    if (!match) return;
+
+    const key = `${now.toISOString().split('T')[0]}-${match.name}`;
+    if (key === lastTriggeredKey) return;
+    lastTriggeredKey = key;
+
+    runScheduledTask(match.name, match.task);
+  }, 60000);
+}
+
 const args = process.argv.slice(2);
-if (args.includes('--update-results')) {
+if (args.includes('--daemon')) {
+  runDaemon();
+} else if (args.includes('--update-results')) {
   updateResults().then(() => process.exit(0));
 } else if (args.includes('--summary')) {
   printSummary();
