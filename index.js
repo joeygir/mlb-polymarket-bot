@@ -3,6 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
@@ -1256,10 +1257,23 @@ async function getTodayGames(opts = {}) {
 const LOGS_DIR = path.join(__dirname, 'logs');
 const DAEMON_LOG_PATH = path.join(LOGS_DIR, 'daemon.log');
 
+// Pushes picks_log.csv after the daemon's update-results run so the graded
+// results survive a redeploy. Failures (nothing to commit, push rejected, no
+// network, etc.) are swallowed so they never take the daemon down.
+function autoPushPicksLog() {
+  const dateStr = new Date().toISOString().split('T')[0];
+  try {
+    execSync(`git add picks_log.csv && git commit -m "auto: update picks log [${dateStr}]" && git push`, { cwd: __dirname, stdio: 'pipe' });
+    console.log('Auto-committed and pushed picks_log.csv');
+  } catch (err) {
+    console.error('Auto git push failed:', err.message);
+  }
+}
+
 const DAEMON_SCHEDULE = [
   { hour: 11, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
   { hour: 17, minute: 0, name: 'afternoon-analysis', task: () => getTodayGames() },
-  { hour: 4, minute: 0, name: 'update-results', task: () => updateResults() },
+  { hour: 4, minute: 0, name: 'update-results', task: async () => { await updateResults(); autoPushPicksLog(); } },
 ];
 
 function appendDaemonLog(message) {
