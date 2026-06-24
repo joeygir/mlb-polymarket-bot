@@ -2,6 +2,7 @@ require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
@@ -469,7 +470,7 @@ function scoreBullpen(awayBullpen, homeBullpen) {
   const add = (text, direction, tier) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ direction, tier, weight });
+    weighted.push({ text, direction, tier, weight });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
 
@@ -518,7 +519,7 @@ function scorePitchers(awayStats, homeStats) {
   const add = (text, direction, tier) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ direction, tier, weight });
+    weighted.push({ text, direction, tier, weight });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
 
@@ -566,7 +567,7 @@ function scoreLineup(teamHitters, label) {
   const add = (text, direction, tier) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ direction, tier, weight });
+    weighted.push({ text, direction, tier, weight });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
 
@@ -604,7 +605,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   const add = (text, direction, tier) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ direction, tier, weight });
+    weighted.push({ text, direction, tier, weight });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
   const merge = (result) => {
@@ -719,11 +720,20 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
 
   const confidence = computeConfidence(weighted);
 
-  return { lean, signals, score, confidence };
+  return { lean, signals, score, confidence, weighted };
 }
-function detectEdge(lean, odds, venue) {
-  if (!odds || lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
+// Edge detection runs entirely on Kalshi decimal prices — that's where bets
+// are actually placed. The Odds API no longer feeds this function at all; it
+// only supplies the total-line number used elsewhere to pick the closest
+// Kalshi strike. Price thresholds below are the decimal-odds equivalents of
+// the old American-juice thresholds (-130 ≈ 1.77x, -115 ≈ 1.87x, -108 ≈ 1.93x).
+function detectEdge(lean, kalshi, venue) {
+  if (lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
     return null;
+  }
+
+  if (!kalshi) {
+    return { label: 'No Kalshi market', reason: 'No Kalshi market found — skipping edge scoring.' };
   }
 
   const isOverLean = ['STRONG OVER', 'OVER', 'LEAN OVER', 'DOME — LEAN OVER'].includes(lean);
@@ -731,45 +741,44 @@ function detectEdge(lean, odds, venue) {
   const isStrong = ['STRONG OVER', 'STRONG UNDER'].includes(lean);
   const isMedium = ['OVER', 'UNDER', 'LEAN OVER', 'LEAN UNDER'].includes(lean);
 
-  const overJuice = parseInt(odds.overJuice);
-  const underJuice = parseInt(odds.underJuice);
+  const { overPrice, underPrice } = kalshi;
+  const fmt = (p) => `${p.toFixed(2)}x`;
 
-  const marketFavorsOver = overJuice < underJuice;
-  const marketFavorsUnder = underJuice < overJuice;
+  const kalshiFavorsOver = overPrice < underPrice;
+  const kalshiFavorsUnder = underPrice < overPrice;
 
-  const relevantJuice = isOverLean ? overJuice : underJuice;
-  const marketAgrees = (isOverLean && marketFavorsOver) || (isUnderLean && marketFavorsUnder);
-  const marketDisagrees = (isOverLean && marketFavorsUnder) || (isUnderLean && marketFavorsOver);
+  const relevantPrice = isOverLean ? overPrice : underPrice;
+  const kalshiAgrees = (isOverLean && kalshiFavorsOver) || (isUnderLean && kalshiFavorsUnder);
+  const kalshiDisagrees = (isOverLean && kalshiFavorsUnder) || (isUnderLean && kalshiFavorsOver);
 
-  // Juice thresholds
-  const juiceTooExpensive = relevantJuice < -130;
-  const juiceFair = relevantJuice >= -115;
-  const juiceNearEven = relevantJuice >= -108;
+  const priceTooExpensive = relevantPrice < 1.77;
+  const priceFair = relevantPrice >= 1.87;
+  const priceNearEven = relevantPrice >= 1.93;
 
-  if (juiceTooExpensive) {
-    return { label: 'PASS', reason: `Market already priced this — juice too expensive (${odds.overJuice}/${odds.underJuice})` };
+  if (priceTooExpensive) {
+    return { label: 'PASS', reason: `Kalshi already priced this — too expensive (${fmt(overPrice)}/${fmt(underPrice)})` };
   }
 
-  if (marketDisagrees && isStrong) {
+  if (kalshiDisagrees && isStrong) {
     if (STADIUM_NOTES[venue]?.windReliability === 'LOW') {
-      return { label: 'TARGET', reason: `Downgraded from PRIME TARGET — wind data unreliable at this park (${STADIUM_NOTES[venue].notes}) — maximum gap (${odds.overJuice}/${odds.underJuice})` };
+      return { label: 'TARGET', reason: `Downgraded from PRIME TARGET — wind data unreliable at this park (${STADIUM_NOTES[venue].notes}) — maximum gap (${fmt(overPrice)}/${fmt(underPrice)})` };
     }
-    return { label: 'PRIME TARGET', reason: `Bot strongly disagrees with market direction — maximum gap (${odds.overJuice}/${odds.underJuice})` };
+    return { label: 'PRIME TARGET', reason: `Bot strongly disagrees with Kalshi pricing — maximum gap (${fmt(overPrice)}/${fmt(underPrice)})` };
   }
 
-  if (marketDisagrees && isMedium) {
-    return { label: 'TARGET', reason: `Bot leans against market direction — gap exists (${odds.overJuice}/${odds.underJuice})` };
+  if (kalshiDisagrees && isMedium) {
+    return { label: 'TARGET', reason: `Bot leans against Kalshi pricing — gap exists (${fmt(overPrice)}/${fmt(underPrice)})` };
   }
 
-  if (marketAgrees && juiceNearEven && isStrong) {
-    return { label: 'SHARP', reason: `Market agrees but juice still fair — strong signal at good price (${odds.overJuice}/${odds.underJuice})` };
+  if (kalshiAgrees && priceNearEven && isStrong) {
+    return { label: 'SHARP', reason: `Kalshi agrees but price still fair — strong signal at good price (${fmt(overPrice)}/${fmt(underPrice)})` };
   }
 
-  if (marketAgrees && juiceFair) {
-    return { label: 'CONSIDER', reason: `Market agrees, price acceptable (${odds.overJuice}/${odds.underJuice})` };
+  if (kalshiAgrees && priceFair) {
+    return { label: 'CONSIDER', reason: `Kalshi agrees, price acceptable (${fmt(overPrice)}/${fmt(underPrice)})` };
   }
 
-  return { label: 'PASS', reason: `Market agrees but juice not favorable enough (${odds.overJuice}/${odds.underJuice})` };
+  return { label: 'PASS', reason: `Kalshi agrees but price not favorable enough (${fmt(overPrice)}/${fmt(underPrice)})` };
 }
 async function getOdds() {
   try {
@@ -810,6 +819,123 @@ async function getOdds() {
   } catch {
     return {};
   }
+}
+
+// --- Kalshi market price integration ---------------------------------------
+// NOTE: Kalshi retired trading-api.kalshi.com in favor of api.elections.kalshi.com
+// (confirmed live — the old host now 401s with a redirect notice). Markets also
+// no longer expose plain integer yes_bid/no_bid cent fields; they return
+// yes_bid_dollars/no_bid_dollars as decimal-dollar strings instead. Both were
+// verified directly against the live API before writing this.
+
+const KALSHI_API_BASE = 'https://api.elections.kalshi.com';
+const KALSHI_PATH_PREFIX = '/trade-api/v2';
+const KALSHI_KEY_PATH = path.join(__dirname, 'kalshi_private_key.pem');
+
+let kalshiPrivateKeyCache = null;
+function getKalshiPrivateKey() {
+  if (kalshiPrivateKeyCache) return kalshiPrivateKeyCache;
+  kalshiPrivateKeyCache = fs.readFileSync(KALSHI_KEY_PATH, 'utf8');
+  return kalshiPrivateKeyCache;
+}
+
+function signKalshiRequest(method, pathWithPrefix) {
+  const timestamp = Date.now().toString();
+  const message = timestamp + method + pathWithPrefix;
+  const privateKey = getKalshiPrivateKey();
+  const signature = crypto.sign('sha256', Buffer.from(message), {
+    key: privateKey,
+    padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: 32,
+  });
+  return {
+    'KALSHI-ACCESS-KEY': process.env.KALSHI_API_KEY_ID,
+    'KALSHI-ACCESS-TIMESTAMP': timestamp,
+    'KALSHI-ACCESS-SIGNATURE': signature.toString('base64'),
+  };
+}
+
+async function kalshiGet(pathNoQuery, params) {
+  const headers = signKalshiRequest('GET', pathNoQuery);
+  const res = await axios.get(`${KALSHI_API_BASE}${pathNoQuery}`, { headers, params });
+  return res.data;
+}
+
+// A market's "yes" price is a probability expressed in dollars (e.g. "0.4700"
+// for 47%); decimal odds are just its inverse (1 / 0.47 = 2.13x).
+function kalshiDollarsToDecimal(dollarStr) {
+  const p = parseFloat(dollarStr);
+  return p > 0 ? 1 / p : null;
+}
+
+const KALSHI_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+// Converts a 'YYYY-MM-DD' (UTC) date string into Kalshi's ticker date token,
+// e.g. '2026-06-24' -> '26JUN24'. Kalshi's event_ticker embeds this token
+// right after the series prefix (e.g. KXMLBTOTAL-26JUN241910CHCNYM...).
+function kalshiDateToken(dateStr) {
+  const [y, m, d] = dateStr.split('-');
+  return `${y.slice(2)}${KALSHI_MONTHS[parseInt(m, 10) - 1]}${d}`;
+}
+
+// Extracts the date token embedded in an event_ticker right after the series
+// prefix (e.g. 'KXMLBTOTAL-26JUN241910CHCNYM' -> '26JUN24'), or null if absent.
+function kalshiTickerDateToken(eventTicker) {
+  const match = (eventTicker || '').match(/^[A-Z]+-(\d{2}[A-Z]{3}\d{2})/);
+  return match ? match[1] : null;
+}
+
+// Fetches today's open MLB total-runs markets from Kalshi (series KXMLBTOTAL)
+// and returns a map of "{away}|{home}" -> { overPrice, underPrice } in decimal
+// odds format. Each game has one Kalshi market per strike (e.g. 6.5, 7.5, 8.5
+// runs) rather than a single line like a sportsbook, so games are matched via
+// the team abbreviations embedded in event_ticker (e.g. "CHCNYM"), filtered to
+// tickers whose embedded date matches today — Kalshi has been observed leaving
+// stale markets from prior days flagged "open" (e.g. a 2-day-old CHC/NYM total
+// market with degenerate prices), so the date check rejects those outright.
+// The strike closest to the sportsbook's posted total is then selected for an
+// apples-to-apples comparison. Games with no sportsbook total to anchor against
+// are skipped. Returns an empty map on any failure or when nothing matches —
+// callers fall back to sportsbook odds in that case.
+async function getKalshiMLBPrices(games, today) {
+  const priceMap = new Map();
+  const todayToken = kalshiDateToken(today);
+
+  let markets;
+  try {
+    const data = await kalshiGet(`${KALSHI_PATH_PREFIX}/markets`, { status: 'open', limit: 1000, series_ticker: 'KXMLBTOTAL' });
+    markets = data?.markets || [];
+  } catch {
+    return priceMap;
+  }
+
+  for (const { away, home, awayAbbr, homeAbbr, total } of games) {
+    if (total == null || !awayAbbr || !homeAbbr) continue;
+
+    const abbrPair = `${awayAbbr}${homeAbbr}`;
+    const gameMarkets = markets.filter(m =>
+      (m.event_ticker || '').includes(abbrPair) && kalshiTickerDateToken(m.event_ticker) === todayToken
+    );
+    if (!gameMarkets.length) continue;
+
+    const targetTotal = parseFloat(total);
+    let best = null;
+    let bestDiff = Infinity;
+    for (const m of gameMarkets) {
+      if (m.floor_strike == null) continue;
+      const diff = Math.abs(m.floor_strike - targetTotal);
+      if (diff < bestDiff) { bestDiff = diff; best = m; }
+    }
+    if (!best) continue;
+
+    // Yes = over the strike, No = under, matching Kalshi's "Total Runs?" phrasing.
+    const overPrice = kalshiDollarsToDecimal(best.yes_bid_dollars);
+    const underPrice = kalshiDollarsToDecimal(best.no_bid_dollars);
+    if (overPrice != null && underPrice != null) {
+      priceMap.set(`${away}|${home}`, { overPrice, underPrice });
+    }
+  }
+
+  return priceMap;
 }
 
 // --- Display-only narrative helpers ---------------------------------------
@@ -885,32 +1011,105 @@ function opsFact(awayHitters, homeHitters, away, home, isOverLean) {
   return null;
 }
 
-function marketSentence(odds, isOverLean) {
-  if (!odds) return 'Market: No odds available.';
-  const overJuice = parseInt(odds.overJuice);
-  const underJuice = parseInt(odds.underJuice);
-  if (overJuice === underJuice) {
-    return `Market: The market is split evenly on this total (${odds.overJuice}/${odds.underJuice}).`;
+function marketSentence(kalshi, isOverLean) {
+  if (!kalshi) return 'Market: No Kalshi market available.';
+  const { overPrice, underPrice } = kalshi;
+  const fmt = (p) => `${p.toFixed(2)}x`;
+  if (overPrice === underPrice) {
+    return `Market: Kalshi is split evenly on this total (Over ${fmt(overPrice)} / Under ${fmt(underPrice)}).`;
   }
-  const marketFavorsOver = overJuice < underJuice;
-  const marketAgrees = isOverLean ? marketFavorsOver : !marketFavorsOver;
-  const marketSide = marketFavorsOver ? 'over' : 'under';
-  return marketAgrees
-    ? `Market: The market also favors the ${marketSide} (${odds.overJuice}/${odds.underJuice}), agreeing with the bot's lean.`
-    : `Market: The market favors the ${marketSide} (${odds.overJuice}/${odds.underJuice}), conflicting with the bot's lean.`;
+  const kalshiFavorsOver = overPrice < underPrice;
+  const kalshiAgrees = isOverLean ? kalshiFavorsOver : !kalshiFavorsOver;
+  const kalshiSide = kalshiFavorsOver ? 'over' : 'under';
+  return kalshiAgrees
+    ? `Market: Kalshi also favors the ${kalshiSide} (Over ${fmt(overPrice)} / Under ${fmt(underPrice)}), agreeing with the bot's lean.`
+    : `Market: Kalshi favors the ${kalshiSide} (Over ${fmt(overPrice)} / Under ${fmt(underPrice)}), conflicting with the bot's lean.`;
 }
 
-async function getTodayGames() {
+function printExplain({ away, home, venue, awayPitcher, homePitcher, awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, weather, stadiumNotes, odds, kalshi, analysis, edge }) {
+  const pf = stadiumNotes?.parkFactor;
+
+  console.log(`\n================ EXPLAIN: ${away} @ ${home} ================`);
+  console.log(`Venue: ${venue} | Park Factor: ${pf != null ? pf.toFixed(2) : 'N/A'}`);
+  console.log(`Lean: ${analysis.lean} | Edge: ${edge.label} | Confidence: ${analysis.confidence}`);
+  console.log(`Sportsbook consensus: O/U ${odds ? odds.total : 'N/A'}`);
+  console.log(kalshi
+    ? `Kalshi: Over ${kalshi.overPrice.toFixed(2)}x / Under ${kalshi.underPrice.toFixed(2)}x`
+    : `Kalshi: No Kalshi market found.`);
+
+  const pitcherLine = (side, name, stats) => {
+    if (!stats) return `${side} pitcher: ${name} — no stats`;
+    return stats.xera != null
+      ? `${side} pitcher: ${name} — xERA ${stats.xera.toFixed(2)} (ERA ${stats.era.toFixed(2)})`
+      : `${side} pitcher: ${name} — ERA ${stats.era.toFixed(2)} (no xERA available)`;
+  };
+  console.log(`\n${pitcherLine('Away', awayPitcher, awayStats)}`);
+  console.log(pitcherLine('Home', homePitcher, homeStats));
+
+  const bullpenLine = (side, bullpen) =>
+    bullpen?.era != null ? `${side} bullpen ERA: ${bullpen.era.toFixed(2)}` : `${side} bullpen: no data`;
+  console.log(`\n${bullpenLine('Away', awayBullpen)}`);
+  console.log(bullpenLine('Home', homeBullpen));
+
+  const opsLine = (side, hitters) => {
+    if (!hitters) return `${side} lineup OPS: no data`;
+    const r = hitters.recentOps != null ? hitters.recentOps.toFixed(3) : 'N/A';
+    const s = hitters.seasonOps != null ? hitters.seasonOps.toFixed(3) : 'N/A';
+    return `${side} lineup OPS — last 15: ${r}, season: ${s}`;
+  };
+  console.log(`\n${opsLine('Away', awayHitters)}`);
+  console.log(opsLine('Home', homeHitters));
+
+  console.log(weather
+    ? `\nWind: ${weather.maxWind}mph ${weather.windDir} | Temp: ${weather.avgTemp}F | ${weather.condition}`
+    : `\nWind: N/A (dome)`);
+
+  console.log(`\nSignals that fired:`);
+  if (!analysis.weighted || analysis.weighted.length === 0) {
+    console.log('  (none)');
+  } else {
+    analysis.weighted.forEach(w => {
+      console.log(`  [Tier ${w.tier}] ${w.text} (${w.direction}, weight ${w.weight})`);
+    });
+  }
+
+  const count = (tier, direction) => (analysis.weighted || []).filter(w => w.tier === tier && w.direction === direction).length;
+  console.log(`\nConfidence breakdown:`);
+  console.log(`  Tier 1 — OVER: ${count(1, 'OVER')}, UNDER: ${count(1, 'UNDER')}`);
+  console.log(`  Tier 2 — OVER: ${count(2, 'OVER')}, UNDER: ${count(2, 'UNDER')}`);
+  console.log(`  → Confidence: ${analysis.confidence}`);
+
+  console.log(`\n${edge.label} — ${edge.reason}`);
+  console.log(`================================================================\n`);
+}
+
+async function getTodayGames(opts = {}) {
+  const explain = !!opts.explain;
   const today = new Date().toISOString().split('T')[0];
   const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team`;
   const [response, oddsMap] = await Promise.all([axios.get(url), getOdds()]);
   const games = response.data.dates[0]?.games || [];
+  const kalshiPrices = await getKalshiMLBPrices(
+    games.map(g => {
+      const away = g.teams.away.team.name;
+      const home = g.teams.home.team.name;
+      return {
+        away,
+        home,
+        awayAbbr: g.teams.away.team.abbreviation,
+        homeAbbr: g.teams.home.team.abbreviation,
+        total: oddsMap[`${away}|${home}`]?.total,
+      };
+    }),
+    today
+  );
 
   console.log(`\n============================`);
-  console.log(` MLB OVER/UNDER BOT — ${today}`);
+  console.log(explain ? ` MLB OVER/UNDER BOT — EXPLAIN MODE — ${today}` : ` MLB OVER/UNDER BOT — ${today}`);
   console.log(`============================\n`);
 
   const results = [];
+  let explainCount = 0;
 
   for (const game of games) {
     const home = game.teams.home.team.name;
@@ -941,18 +1140,29 @@ async function getTodayGames() {
 
     const oddsKey = `${away}|${home}`;
     const odds = oddsMap[oddsKey];
+    const kalshi = kalshiPrices.get(oddsKey);
     const stadiumNotes = STADIUM_NOTES[venue];
     const isOverLean = OVER_LEANS.includes(analysis.lean);
-    const edge = detectEdge(analysis.lean, odds, venue);
+    const edge = detectEdge(analysis.lean, kalshi, venue);
 
     const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
     if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
       logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds);
     }
 
+    if (explain) {
+      if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET')) {
+        printExplain({ away, home, venue, awayPitcher, homePitcher, awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, weather, stadiumNotes, odds, kalshi, analysis, edge });
+        explainCount++;
+      }
+      continue;
+    }
+
     const pf = stadiumNotes?.parkFactor;
     const line1 = `${away} @ ${home} | ${venue} | Park Factor: ${pf != null ? pf.toFixed(2) : 'N/A'}`;
     let line2 = null;
+    let sportsbookLine = null;
+    let kalshiLine = null;
     let leaderboardSentence = null;
 
     console.log(line1);
@@ -960,11 +1170,19 @@ async function getTodayGames() {
     if (analysis.lean === 'AVOID') {
       console.log('Rain/storm risk — skip.');
     } else {
-      const totalText = odds ? odds.total : 'N/A';
-      const leanJuice = odds ? (isOverLean ? odds.overJuice : odds.underJuice) : 'N/A';
       const edgeLabelText = edge ? edge.label : 'No Edge';
-      line2 = `${analysis.lean} | ${edgeLabelText} | O/U ${totalText} | ${leanJuice}`;
+      line2 = `${analysis.lean} | ${edgeLabelText}`;
       console.log(line2);
+
+      sportsbookLine = odds
+        ? `Sportsbook consensus: O/U ${odds.total}`
+        : `Sportsbook consensus: No odds available.`;
+      console.log(sportsbookLine);
+
+      kalshiLine = kalshi
+        ? `Kalshi: Over ${kalshi.overPrice.toFixed(2)}x / Under ${kalshi.underPrice.toFixed(2)}x`
+        : `Kalshi: No Kalshi market found.`;
+      console.log(kalshiLine);
 
       const depth = narrativeDepth(analysis.lean);
       if (depth > 0) {
@@ -979,13 +1197,19 @@ async function getTodayGames() {
           console.log(sentences.join(' '));
           leaderboardSentence = sentences[0];
         }
-        console.log(marketSentence(odds, isOverLean));
+        console.log(marketSentence(kalshi, isOverLean));
       }
     }
 
     console.log('---\n');
 
-    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, leaderboardSentence });
+    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, kalshi, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, sportsbookLine, kalshiLine, leaderboardSentence });
+  }
+
+  if (explain) {
+    if (explainCount === 0) console.log('No TARGET or PRIME TARGET calls today.\n');
+    console.log(`============================\n`);
+    return;
   }
 
   // Leaderboard — TARGET and PRIME TARGET calls only
@@ -1007,6 +1231,8 @@ async function getTodayGames() {
     actionable.forEach((r) => {
       console.log(r.line1);
       console.log(r.line2);
+      console.log(r.sportsbookLine);
+      console.log(r.kalshiLine);
       if (r.leaderboardSentence) console.log(r.leaderboardSentence);
       console.log('');
     });
@@ -1025,6 +1251,8 @@ if (args.includes('--update-results')) {
   const i = args.indexOf('--stake');
   const [game, amount, date] = args.slice(i + 1);
   setStake(game, amount, date);
+} else if (args.includes('--explain')) {
+  getTodayGames({ explain: true });
 } else {
   getTodayGames();
 }

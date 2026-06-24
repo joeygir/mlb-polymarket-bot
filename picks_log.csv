@@ -9,10 +9,19 @@ Date,Game,Lean,Confidence,Edge_Label,Total_Line,Side,Side_Juice,Stake,Result,Hit
 2026-06-21,Baltimore Orioles @ Los Angeles Dodgers,OVER,,TARGET,9.1,OVER,-58,,OVER,HIT,17.24
 2026-06-21,Milwaukee Brewers @ Atlanta Braves,LEAN OVER,,TARGET,8.9,OVER,-38,,OVER,HIT,26.32
 2026-06-21,Boston Red Sox @ Seattle Mariners,STRONG UNDER,,PRIME TARGET,6.5,UNDER,-82,5,UNDER,HIT,6.1
-2026-06-22,New York Yankees @ Detroit Tigers,LEAN UNDER,,TARGET,8.5,UNDER,-106,,,,
-2026-06-22,Arizona Diamondbacks @ St. Louis Cardinals,LEAN OVER,,TARGET,8.5,OVER,-109,,,,
-2026-06-22,Texas Rangers @ Miami Marlins,LEAN OVER,,TARGET,7.4,OVER,-110,,,,
-2026-06-22,Atlanta Braves @ San Diego Padres,LEAN OVER,,TARGET,7.5,OVER,+32,,,,
-2026-06-23,Cleveland Guardians @ Chicago White Sox,UNDER,,TARGET,7.1,UNDER,-32,,,,
-2026-06-23,Texas Rangers @ Miami Marlins,LEAN OVER,MEDIUM,TARGET,8.5,OVER,-108,,,,
-2026-06-23,New York Yankees @ Detroit Tigers,LEAN UNDER,MEDIUM,TARGET,7.5,UNDER,-109,,,,
+2026-06-22,New York Yankees @ Detroit Tigers,LEAN UNDER,,TARGET,8.5,UNDER,-106,,UNDER,HIT,9.43
+2026-06-22,Arizona Diamondbacks @ St. Louis Cardinals,LEAN OVER,,TARGET,8.5,OVER,-109,,UNDER,MISS,-10
+2026-06-22,Texas Rangers @ Miami Marlins,LEAN OVER,,TARGET,7.4,OVER,-110,,UNDER,MISS,-10
+2026-06-22,Atlanta Braves @ San Diego Padres,LEAN OVER,,TARGET,7.5,OVER,+32,,UNDER,MISS,-10
+2026-06-23,Cleveland Guardians @ Chicago White Sox,UNDER,,TARGET,7.1,UNDER,-32,,UNDER,HIT,31.25
+2026-06-23,Texas Rangers @ Miami Marlins,LEAN OVER,MEDIUM,TARGET,8.5,OVER,-108,,OVER,HIT,9.26
+2026-06-23,New York Yankees @ Detroit Tigers,LEAN UNDER,MEDIUM,TARGET,7.5,UNDER,-109,,UNDER,HIT,9.17
+2026-06-23,Milwaukee Brewers @ Cincinnati Reds,LEAN OVER,HIGH,TARGET,9.0,OVER,-107,,UNDER,MISS,-10
+2026-06-23,Arizona Diamondbacks @ St. Louis Cardinals,OVER,HIGH,TARGET,8.5,OVER,-107,,UNDER,MISS,-10
+2026-06-23,Athletics @ San Francisco Giants,LEAN OVER,HIGH,TARGET,8.0,OVER,+47,,UNDER,MISS,-10
+2026-06-24,Baltimore Orioles @ Los Angeles Angels,LEAN OVER,MEDIUM,TARGET,9.4,OVER,+6,,,,
+2026-06-24,Athletics @ San Francisco Giants,LEAN UNDER,HIGH,TARGET,8.5,UNDER,+36,,,,
+2026-06-24,Boston Red Sox @ Colorado Rockies,LEAN OVER,HIGH,TARGET,11.2,OVER,-88,,,,
+2026-06-24,Kansas City Royals @ Tampa Bay Rays,DOME — LEAN OVER,MEDIUM,KALSHI EDGE,8.0,OVER,-111,,,,
+2026-06-24,Houston Astros @ Toronto Blue Jays,DOME — LEAN UNDER,MEDIUM,KALSHI EDGE,8.5,UNDER,-107,,,,
+2026-06-24,Atlanta Braves @ San Diego Padres,LEAN UNDER,MEDIUM,KALSHI EDGE,8.5,UNDER,-117,,,,
