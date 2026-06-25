@@ -3,7 +3,6 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execSync } = require('child_process');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
@@ -1257,23 +1256,69 @@ async function getTodayGames(opts = {}) {
 const LOGS_DIR = path.join(__dirname, 'logs');
 const DAEMON_LOG_PATH = path.join(LOGS_DIR, 'daemon.log');
 
-// Pushes picks_log.csv after the daemon's update-results run so the graded
-// results survive a redeploy. Failures (nothing to commit, push rejected, no
-// network, etc.) are swallowed so they never take the daemon down.
-function autoPushPicksLog() {
+// Pushes picks_log.csv after the daemon's update-results run using the GitHub
+// Contents API, so it works even when git isn't available (e.g. Railway container).
+// Reads the current SHA, base64-encodes the file, and PUTs via GitHub API with
+// GITHUB_TOKEN. Failures are swallowed so they never take the daemon down.
+async function autoPushPicksLog() {
   const dateStr = new Date().toISOString().split('T')[0];
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    console.error('GITHUB_TOKEN not set — skipping auto-push');
+    return;
+  }
+
   try {
-    execSync(`git add picks_log.csv && git commit -m "auto: update picks log [${dateStr}]" && git push`, { cwd: __dirname, stdio: 'pipe' });
-    console.log('Auto-committed and pushed picks_log.csv');
+    // Read the current file from the repo to get the SHA.
+    const getRes = await fetch(
+      'https://api.github.com/repos/joeygir/mlb-polymarket-bot/contents/picks_log.csv',
+      { headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json' } }
+    );
+
+    if (!getRes.ok) {
+      console.error(`Failed to fetch current SHA: ${getRes.status}`);
+      return;
+    }
+
+    const { sha } = await getRes.json();
+
+    // Read the local file and base64-encode it.
+    const content = fs.readFileSync(PICKS_LOG, 'utf8');
+    const encoded = Buffer.from(content).toString('base64');
+
+    // Push the updated file via GitHub Contents API.
+    const putRes = await fetch(
+      'https://api.github.com/repos/joeygir/mlb-polymarket-bot/contents/picks_log.csv',
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: `auto: update picks log [${dateStr}]`,
+          content: encoded,
+          sha,
+        }),
+      }
+    );
+
+    if (!putRes.ok) {
+      console.error(`Failed to push to GitHub: ${putRes.status}`);
+      return;
+    }
+
+    console.log('Auto-committed and pushed picks_log.csv via GitHub API');
   } catch (err) {
-    console.error('Auto git push failed:', err.message);
+    console.error('Auto-push failed:', err.message);
   }
 }
 
 const DAEMON_SCHEDULE = [
-  { hour: 11, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
+  { hour: 14, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
   { hour: 17, minute: 0, name: 'afternoon-analysis', task: () => getTodayGames() },
-  { hour: 4, minute: 0, name: 'update-results', task: async () => { await updateResults(); autoPushPicksLog(); } },
+  { hour: 4, minute: 0, name: 'update-results', task: async () => { await updateResults(); await autoPushPicksLog(); } },
 ];
 
 function appendDaemonLog(message) {
@@ -1310,8 +1355,8 @@ async function runScheduledTask(name, task) {
 function runDaemon() {
   if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
-  appendDaemonLog('Daemon started — schedule: 11:00 UTC (analysis), 17:00 UTC (analysis), 04:00 UTC (update-results)');
-  console.log('Daemon started. Checking schedule every 60s — 11:00 & 17:00 UTC (analysis), 04:00 UTC (update-results).');
+  appendDaemonLog('Daemon started — schedule: 14:00 UTC (analysis), 17:00 UTC (analysis), 04:00 UTC (update-results)');
+  console.log('Daemon started. Checking schedule every 60s — 14:00 & 17:00 UTC (analysis), 04:00 UTC (update-results).');
 
   let lastTriggeredKey = null;
 
