@@ -1316,8 +1316,8 @@ async function autoPushPicksLog() {
 }
 
 const DAEMON_SCHEDULE = [
-  { hour: 14, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
-  { hour: 17, minute: 0, name: 'afternoon-analysis', task: () => getTodayGames() },
+  { hour: 16, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
+  { hour: 23, minute: 0, name: 'afternoon-analysis', task: () => getTodayGames() },
   { hour: 4, minute: 0, name: 'update-results', task: async () => { await updateResults(); await autoPushPicksLog(); } },
 ];
 
@@ -1355,8 +1355,8 @@ async function runScheduledTask(name, task) {
 function runDaemon() {
   if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
-  appendDaemonLog('Daemon started — schedule: 14:00 UTC (analysis), 17:00 UTC (analysis), 04:00 UTC (update-results)');
-  console.log('Daemon started. Checking schedule every 60s — 14:00 & 17:00 UTC (analysis), 04:00 UTC (update-results).');
+  appendDaemonLog('Daemon started — schedule: 16:00 UTC (analysis), 23:00 UTC (analysis), 04:00 UTC (update-results)');
+  console.log('Daemon started. Checking schedule every 60s — 16:00 & 23:00 UTC (analysis), 04:00 UTC (update-results).');
 
   let lastTriggeredKey = null;
 
