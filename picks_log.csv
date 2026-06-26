@@ -19,9 +19,9 @@ Date,Game,Lean,Confidence,Edge_Label,Total_Line,Side,Side_Juice,Stake,Result,Hit
 2026-06-23,Milwaukee Brewers @ Cincinnati Reds,LEAN OVER,HIGH,TARGET,9.0,OVER,-107,,UNDER,MISS,-10
 2026-06-23,Arizona Diamondbacks @ St. Louis Cardinals,OVER,HIGH,TARGET,8.5,OVER,-107,,UNDER,MISS,-10
 2026-06-23,Athletics @ San Francisco Giants,LEAN OVER,HIGH,TARGET,8.0,OVER,+47,,UNDER,MISS,-10
-2026-06-24,Baltimore Orioles @ Los Angeles Angels,LEAN OVER,MEDIUM,TARGET,9.4,OVER,+6,,,,
-2026-06-24,Athletics @ San Francisco Giants,LEAN UNDER,HIGH,TARGET,8.5,UNDER,+36,,,,
-2026-06-24,Boston Red Sox @ Colorado Rockies,LEAN OVER,HIGH,TARGET,11.2,OVER,-88,,,,
-2026-06-24,Kansas City Royals @ Tampa Bay Rays,DOME — LEAN OVER,MEDIUM,KALSHI EDGE,8.0,OVER,-111,,,,
-2026-06-24,Houston Astros @ Toronto Blue Jays,DOME — LEAN UNDER,MEDIUM,KALSHI EDGE,8.5,UNDER,-107,,,,
-2026-06-24,Atlanta Braves @ San Diego Padres,LEAN UNDER,MEDIUM,KALSHI EDGE,8.5,UNDER,-117,,,,
+2026-06-24,Baltimore Orioles @ Los Angeles Angels,LEAN OVER,MEDIUM,TARGET,9.4,OVER,+6,,OVER,HIT,0.6
+2026-06-24,Athletics @ San Francisco Giants,LEAN UNDER,HIGH,TARGET,8.5,UNDER,+36,,UNDER,HIT,3.6
+2026-06-24,Boston Red Sox @ Colorado Rockies,LEAN OVER,HIGH,TARGET,11.2,OVER,-88,,OVER,HIT,11.36
+2026-06-24,Kansas City Royals @ Tampa Bay Rays,DOME — LEAN OVER,MEDIUM,KALSHI EDGE,8.0,OVER,-111,,PUSH,PUSH,0
+2026-06-24,Houston Astros @ Toronto Blue Jays,DOME — LEAN UNDER,MEDIUM,KALSHI EDGE,8.5,UNDER,-107,,UNDER,HIT,9.35
+2026-06-24,Atlanta Braves @ San Diego Padres,LEAN UNDER,MEDIUM,KALSHI EDGE,8.5,UNDER,-117,,UNDER,HIT,8.55
