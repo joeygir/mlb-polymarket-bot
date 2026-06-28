@@ -1320,11 +1320,40 @@ async function autoPushPicksLog() {
   }
 }
 
-const DAEMON_SCHEDULE = [
-  { hour: 16, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
-  { hour: 23, minute: 0, name: 'afternoon-analysis', task: () => getTodayGames() },
-  { hour: 4, minute: 0, name: 'update-results', task: async () => { await updateResults(); await autoPushPicksLog(); } },
-];
+// Returns the schedule for the given day (0=Sunday, 6=Saturday).
+// Weekdays: 16:00 UTC (noon ET), 23:00 UTC (7pm ET), 04:00 UTC (midnight ET)
+// Saturdays: 15:00 UTC (11am ET), 18:00 UTC (2pm ET), 04:00 UTC (midnight ET)
+// Sundays: 14:00 UTC (10am ET), 15:30 UTC (11:30am ET), 04:00 UTC (midnight ET)
+function getScheduleForDay(dayOfWeek) {
+  const updateTask = async () => { await updateResults(); await autoPushPicksLog(); };
+
+  if (dayOfWeek === 0) {
+    // Sunday
+    return [
+      { hour: 14, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
+      { hour: 15, minute: 30, name: 'pregame-analysis', task: () => getTodayGames() },
+      { hour: 4, minute: 0, name: 'update-results', task: updateTask },
+    ];
+  } else if (dayOfWeek === 6) {
+    // Saturday
+    return [
+      { hour: 15, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
+      { hour: 18, minute: 0, name: 'pregame-analysis', task: () => getTodayGames() },
+      { hour: 4, minute: 0, name: 'update-results', task: updateTask },
+    ];
+  } else {
+    // Weekday (Monday-Friday)
+    return [
+      { hour: 16, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
+      { hour: 23, minute: 0, name: 'pregame-analysis', task: () => getTodayGames() },
+      { hour: 4, minute: 0, name: 'update-results', task: updateTask },
+    ];
+  }
+}
+
+function getDayName(dayOfWeek) {
+  return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek];
+}
 
 function appendDaemonLog(message) {
   fs.appendFileSync(DAEMON_LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
@@ -1360,8 +1389,14 @@ async function runScheduledTask(name, task) {
 function runDaemon() {
   if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
-  appendDaemonLog('Daemon started — schedule: 16:00 UTC (analysis), 23:00 UTC (analysis), 04:00 UTC (update-results)');
-  console.log('Daemon started. Checking schedule every 60s — 16:00 & 23:00 UTC (analysis), 04:00 UTC (update-results).');
+  const now = new Date();
+  const dayOfWeek = now.getUTCDay();
+  const dayName = getDayName(dayOfWeek);
+  const schedule = getScheduleForDay(dayOfWeek);
+
+  const scheduleTimes = schedule.map(s => `${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`).join(', ');
+  appendDaemonLog(`Daemon started (${dayName}) — schedule: ${scheduleTimes} UTC`);
+  console.log(`Daemon started (${dayName}). Checking schedule every 60s — ${scheduleTimes} UTC.`);
 
   let lastTriggeredKey = null;
 
@@ -1369,8 +1404,10 @@ function runDaemon() {
     const now = new Date();
     const hour = now.getUTCHours();
     const minute = now.getUTCMinutes();
+    const dayOfWeek = now.getUTCDay();
+    const schedule = getScheduleForDay(dayOfWeek);
 
-    const match = DAEMON_SCHEDULE.find(s => s.hour === hour && s.minute === minute);
+    const match = schedule.find(s => s.hour === hour && s.minute === minute);
     if (!match) return;
 
     const key = `${now.toISOString().split('T')[0]}-${match.name}`;
