@@ -219,6 +219,7 @@ const STADIUMS = {
   'Great American Ball Park':         { lat: 39.0979, lon: -84.5082, outDirs: ['N','NW','NNW','NE','NNE'] },
   'Guaranteed Rate Field':            { lat: 41.8300, lon: -87.6339, outDirs: ['S','SW','SSW','SE','SSE'] },
   'Camden Yards':                     { lat: 39.2838, lon: -76.6218, outDirs: ['W','SW','WSW','NW','WNW'] },
+  'Oriole Park at Camden Yards':      { lat: 39.2838, lon: -76.6218, outDirs: ['W','SW','WSW','NW','WNW'] },
   'Nationals Park':                   { lat: 38.8730, lon: -77.0074, outDirs: ['E','SE','ESE','NE','ENE'] },
   'Citi Field':                       { lat: 40.7571, lon: -73.8458, outDirs: ['W','SW','WSW','NW','WNW'] },
   'Kauffman Stadium':                 { lat: 39.0517, lon: -94.4803, outDirs: ['E','NE','ENE','SE','ESE'] },
@@ -256,6 +257,7 @@ const STADIUM_NOTES = {
   'Great American Ball Park':       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.12, notes: 'River-side open park — wind tracks forecast closely.' },
   'Guaranteed Rate Field':          { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.99, notes: 'Open design — wind generally matches forecast.' },
   'Camden Yards':                   { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.07, notes: 'Warehouse beyond right field can create swirl that forecast wind direction misses.' },
+  'Oriole Park at Camden Yards':    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.07, notes: 'Warehouse beyond right field can create swirl that forecast wind direction misses.' },
   'Nationals Park':                 { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.00, notes: 'Open riverside design — wind tracks forecast closely.' },
   'Citi Field':                     { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.98, notes: 'Open design — wind generally reliable versus forecast.' },
   'Kauffman Stadium':               { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.01, notes: 'Open bowl — wind tracks forecast closely.' },
@@ -284,6 +286,7 @@ const CROSSWIND_DIRS = {
   'Comerica Park':          ['E','W','ESE','WNW','ENE','WSW'],
   'Truist Park':            ['N','S','NNE','SSW','NNW','SSE'],
   'Camden Yards':           ['N','S','NNE','SSW','NNW','SSE'],
+  'Oriole Park at Camden Yards': ['N','S','NNE','SSW','NNW','SSE'],
   'Citi Field':             ['N','S','NNE','SSW','NNW','SSE'],
 };
 
@@ -332,7 +335,9 @@ async function getPitcherStats(pitcherName) {
     const splits = stats.data.stats?.[0]?.splits?.[0]?.stat;
     if (!splits) return null;
 
-    const xera = await getXERA(player.id);
+    let xera = await getXERA(player.id);
+    // Sanity check: xERA > 8.0 suggests unreliable small sample — skip from scoring.
+    if (xera != null && xera > 8.0) xera = null;
 
     return {
       name: pitcherName,
