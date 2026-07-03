@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { sendEmailReport } = require('./email');
+const { sendEmailReport, testEmailReport } = require('./email');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
@@ -1427,6 +1427,8 @@ if (args.includes('--daemon')) {
   updateResults().then(() => process.exit(0));
 } else if (args.includes('--summary')) {
   printSummary();
+} else if (args.includes('--send-test-email')) {
+  testEmailReport().then(() => process.exit(0));
 } else if (args.includes('--send-email')) {
   sendEmailReport().then(() => process.exit(0));
 } else if (args.includes('--stake')) {

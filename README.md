@@ -40,6 +40,27 @@ node index.js --stake "<game>" <amount> <date>   # set the stake for a logged pi
 
 Picks that meet the confidence gate (MEDIUM or HIGH) and earn a TARGET or PRIME TARGET edge label are automatically logged to `picks_log.csv` for tracking.
 
+## Daemon mode (continuous operation)
+
+For research and daily tracking, run the daemon to automatically execute all tasks on schedule:
+
+```bash
+node index.js --daemon
+```
+
+**Schedule (UTC):**
+- **Weekdays** (Mon-Fri): 16:00 (morning analysis), 23:00 (pregame analysis), 04:00 (grade results)
+- **Saturdays**: 15:00, 18:00, 04:00
+- **Sundays**: 14:00, 15:30, 04:00
+
+The daemon will:
+1. Generate daily picks at scheduled times
+2. Grade picks from the previous day at 04:00 UTC
+3. Send email summaries after analysis runs (if configured)
+4. Log all activity to `logs/daemon.log`
+
+**Deployment:** The daemon should run continuously (e.g., on Railway, Heroku, or a local machine). See `logs/daemon.log` for execution history.
+
 ## Email reporting (optional)
 
 The daemon can automatically send daily email summaries of yesterday's results and today's picks.

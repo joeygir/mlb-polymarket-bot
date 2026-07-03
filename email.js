@@ -286,21 +286,31 @@ function buildEmailHTML() {
   return { subject, html };
 }
 
-async function sendEmailReport() {
+async function sendEmailReport(opts = {}) {
+  const forceTest = opts.forceTest || false;
   const user = process.env.EMAIL_USER;
   const pass = process.env.EMAIL_PASS;
   const to = process.env.EMAIL_TO;
 
   if (!user || !pass || !to) {
     console.log('Email credentials not configured — skipping email report');
+    console.log(`  EMAIL_USER: ${user ? '✓' : '✗'}`);
+    console.log(`  EMAIL_PASS: ${pass ? '✓' : '✗'}`);
+    console.log(`  EMAIL_TO: ${to ? '✓' : '✗'}`);
     return;
   }
 
-  const { picks: todayPicks } = { picks: getTodaysPicks() };
-  if (todayPicks.length === 0) {
+  const todayPicks = getTodaysPicks();
+  if (todayPicks.length === 0 && !forceTest) {
     console.log('No picks today — skipping email');
     return;
   }
+
+  if (forceTest) {
+    console.log('[TEST MODE] Sending test email regardless of picks...');
+  }
+
+  console.log(`Preparing email with ${todayPicks.length} picks for ${to}...`);
 
   const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -313,16 +323,22 @@ async function sendEmailReport() {
   const { subject, html } = buildEmailHTML();
 
   try {
-    await transporter.sendMail({
+    console.log(`Connecting to Gmail SMTP...`);
+    const info = await transporter.sendMail({
       from: user,
       to,
       subject,
       html,
     });
-    console.log(`Email sent to ${to}`);
+    console.log(`✓ Email sent successfully to ${to}`);
+    console.log(`  Message ID: ${info.messageId}`);
   } catch (err) {
-    console.error(`Failed to send email: ${err.message}`);
+    console.error(`✗ Failed to send email: ${err.message}`);
+    if (err.response) console.error(`  Response: ${err.response}`);
   }
 }
 
-module.exports = { sendEmailReport };
+module.exports = {
+  sendEmailReport,
+  testEmailReport: () => sendEmailReport({ forceTest: true })
+};
