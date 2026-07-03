@@ -3,6 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { sendEmailReport } = require('./email');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
@@ -1326,26 +1327,27 @@ async function autoPushPicksLog() {
 // Sundays: 14:00 UTC (10am ET), 15:30 UTC (11:30am ET), 04:00 UTC (midnight ET)
 function getScheduleForDay(dayOfWeek) {
   const updateTask = async () => { await updateResults(); await autoPushPicksLog(); };
+  const analysisWithEmail = async () => { await getTodayGames(); await sendEmailReport(); };
 
   if (dayOfWeek === 0) {
     // Sunday
     return [
-      { hour: 14, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
-      { hour: 15, minute: 30, name: 'pregame-analysis', task: () => getTodayGames() },
+      { hour: 14, minute: 0, name: 'morning-analysis', task: analysisWithEmail },
+      { hour: 15, minute: 30, name: 'pregame-analysis', task: analysisWithEmail },
       { hour: 4, minute: 0, name: 'update-results', task: updateTask },
     ];
   } else if (dayOfWeek === 6) {
     // Saturday
     return [
-      { hour: 15, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
-      { hour: 18, minute: 0, name: 'pregame-analysis', task: () => getTodayGames() },
+      { hour: 15, minute: 0, name: 'morning-analysis', task: analysisWithEmail },
+      { hour: 18, minute: 0, name: 'pregame-analysis', task: analysisWithEmail },
       { hour: 4, minute: 0, name: 'update-results', task: updateTask },
     ];
   } else {
     // Weekday (Monday-Friday)
     return [
-      { hour: 16, minute: 0, name: 'morning-analysis', task: () => getTodayGames() },
-      { hour: 23, minute: 0, name: 'pregame-analysis', task: () => getTodayGames() },
+      { hour: 16, minute: 0, name: 'morning-analysis', task: analysisWithEmail },
+      { hour: 23, minute: 0, name: 'pregame-analysis', task: analysisWithEmail },
       { hour: 4, minute: 0, name: 'update-results', task: updateTask },
     ];
   }
@@ -1425,6 +1427,8 @@ if (args.includes('--daemon')) {
   updateResults().then(() => process.exit(0));
 } else if (args.includes('--summary')) {
   printSummary();
+} else if (args.includes('--send-email')) {
+  sendEmailReport().then(() => process.exit(0));
 } else if (args.includes('--stake')) {
   const i = args.indexOf('--stake');
   const [game, amount, date] = args.slice(i + 1);
