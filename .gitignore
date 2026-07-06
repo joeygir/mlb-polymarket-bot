@@ -5,3 +5,6 @@ output.txt
 code.md
 today.md
 logs/
+data/
+__pycache__/
+*.pyc
