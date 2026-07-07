@@ -8,6 +8,13 @@ const { sendEmailReport, testEmailReport } = require('./email');
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
 
+const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
+const REGRESSION_MILESTONE_TARGET = 200;
+
+function regressionMilestoneLine(resolvedCount) {
+  return `Regression milestone: ${resolvedCount}/${REGRESSION_MILESTONE_TARGET} resolved picks logged. At ${REGRESSION_MILESTONE_TARGET} picks, signal weights will be recalibrated based on empirical hit rates.`;
+}
+
 function parseCSV(content) {
   const lines = content.trim().split('\n').filter(Boolean);
   if (lines.length < 1) return { headers: CSV_HEADERS, rows: [] };
@@ -160,6 +167,8 @@ function printSummary() {
   console.log('\n============================');
   console.log(' PERFORMANCE SUMMARY');
   console.log('============================\n');
+  console.log(regressionMilestoneLine(total));
+  console.log('');
   console.log(`Total picks logged : ${rows.length}`);
   console.log(`Resolved picks     : ${total}`);
   console.log(`Overall hit rate   : ${hits}/${total} (${total > 0 ? (hits/total*100).toFixed(1) : '0.0'}%)`);
@@ -1435,6 +1444,9 @@ async function runScheduledTask(name, task) {
 
 function runDaemon() {
   if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+
+  console.log(`\n${PAPER_TRADING_NOTICE}\n`);
+  appendDaemonLog(PAPER_TRADING_NOTICE);
 
   const kalshiAuthOk = verifyKalshiAuth();
   appendDaemonLog(kalshiAuthOk ? 'Kalshi auth: OK' : 'Kalshi auth: FAILED - check KALSHI_PRIVATE_KEY env var');

@@ -4,6 +4,19 @@ const path = require('path');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 
+const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
+const REGRESSION_MILESTONE_TARGET = 200;
+
+function regressionMilestoneLine(resolvedCount) {
+  return `Regression milestone: ${resolvedCount}/${REGRESSION_MILESTONE_TARGET} resolved picks logged. At ${REGRESSION_MILESTONE_TARGET} picks, signal weights will be recalibrated based on empirical hit rates.`;
+}
+
+function getResolvedPicksCount() {
+  if (!fs.existsSync(PICKS_LOG)) return 0;
+  const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
+  return rows.filter(r => r.Hit_Miss && r.Hit_Miss !== 'PUSH').length;
+}
+
 function parseCSV(content) {
   const lines = content.trim().split('\n').filter(Boolean);
   if (lines.length < 1) return { headers: [], rows: [] };
@@ -124,6 +137,7 @@ function buildEmailHTML() {
   const picksCount = todayPicks.length;
   const streak = overallStats?.streak || 'None';
   const subject = `MLB Bot — ${today} | ${picksCount} picks today | Streak: ${streak}`;
+  const resolvedCount = getResolvedPicksCount();
 
   let html = `
 <!DOCTYPE html>
@@ -148,11 +162,17 @@ function buildEmailHTML() {
     th, td { padding: 8px; text-align: left; border-bottom: 1px solid #444; }
     th { background: #3e3e3e; color: #569cd6; font-weight: bold; }
     td { background: #252525; }
+    .notice-banner { background: #3a2f00; border: 2px solid #d7ba7d; color: #ffd866; padding: 12px; margin-bottom: 20px; border-radius: 4px; font-weight: bold; }
+    .milestone-line { margin-top: 8px; color: #9cdcfe; font-weight: normal; }
   </style>
 </head>
 <body>
 <div class="container">
   <div class="header">⚾ MLB BOT REPORT — ${today}</div>
+  <div class="notice-banner">
+    ${PAPER_TRADING_NOTICE}
+    <div class="milestone-line">${regressionMilestoneLine(resolvedCount)}</div>
+  </div>
 `;
 
   // Yesterday's Results Section
