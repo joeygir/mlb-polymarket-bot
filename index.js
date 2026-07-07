@@ -904,10 +904,11 @@ function kalshiTickerDateToken(eventTicker) {
 // tickers whose embedded date matches today — Kalshi has been observed leaving
 // stale markets from prior days flagged "open" (e.g. a 2-day-old CHC/NYM total
 // market with degenerate prices), so the date check rejects those outright.
-// The strike closest to the sportsbook's posted total is then selected for an
-// apples-to-apples comparison. Games with no sportsbook total to anchor against
-// are skipped. Returns an empty map on any failure or when nothing matches —
-// callers fall back to sportsbook odds in that case.
+// The strike closest to the sportsbook's posted total is selected when a total
+// is available; otherwise the strike nearest a 0.50 yes price (the market's
+// own implied pick'em line) is used instead, so a missing sportsbook total no
+// longer skips the game entirely. Returns an empty map on any failure or when
+// nothing matches — callers fall back to sportsbook odds in that case.
 async function getKalshiMLBPrices(games, today) {
   const priceMap = new Map();
   const todayToken = kalshiDateToken(today);
@@ -916,34 +917,62 @@ async function getKalshiMLBPrices(games, today) {
   try {
     const data = await kalshiGet(`${KALSHI_PATH_PREFIX}/markets`, { status: 'open', limit: 1000, series_ticker: 'KXMLBTOTAL' });
     markets = data?.markets || [];
-  } catch {
+  } catch (err) {
+    console.log(`[KALSHI-DEBUG] Failed to fetch Kalshi markets: ${err.message}`);
     return priceMap;
   }
 
   for (const { away, home, awayAbbr, homeAbbr, total } of games) {
-    if (total == null || !awayAbbr || !homeAbbr) continue;
+    const label = `${away} @ ${home}`;
+
+    if (!awayAbbr || !homeAbbr) {
+      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=no (missing team abbreviation) | result=SKIPPED`);
+      continue;
+    }
 
     const abbrPair = `${awayAbbr}${homeAbbr}`;
     const gameMarkets = markets.filter(m =>
       (m.event_ticker || '').includes(abbrPair) && kalshiTickerDateToken(m.event_ticker) === todayToken
     );
-    if (!gameMarkets.length) continue;
 
-    const targetTotal = parseFloat(total);
+    if (!gameMarkets.length) {
+      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_TICKER_MATCH (0 markets found for date token ${todayToken})`);
+      continue;
+    }
+
+    // When there's no sportsbook total to anchor against, fall back to the
+    // strike nearest a 0.50 yes price as the market's own implied consensus line.
     let best = null;
     let bestDiff = Infinity;
-    for (const m of gameMarkets) {
-      if (m.floor_strike == null) continue;
-      const diff = Math.abs(m.floor_strike - targetTotal);
-      if (diff < bestDiff) { bestDiff = diff; best = m; }
+    if (total != null) {
+      const targetTotal = parseFloat(total);
+      for (const m of gameMarkets) {
+        if (m.floor_strike == null) continue;
+        const diff = Math.abs(m.floor_strike - targetTotal);
+        if (diff < bestDiff) { bestDiff = diff; best = m; }
+      }
+    } else {
+      for (const m of gameMarkets) {
+        const yesPrice = parseFloat(m.yes_bid_dollars);
+        if (isNaN(yesPrice)) continue;
+        const diff = Math.abs(yesPrice - 0.5);
+        if (diff < bestDiff) { bestDiff = diff; best = m; }
+      }
     }
-    if (!best) continue;
+
+    if (!best) {
+      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_USABLE_STRIKE (${gameMarkets.length} markets found, none had usable pricing)`);
+      continue;
+    }
 
     // Yes = over the strike, No = under, matching Kalshi's "Total Runs?" phrasing.
     const overPrice = kalshiDollarsToDecimal(best.yes_bid_dollars);
     const underPrice = kalshiDollarsToDecimal(best.no_bid_dollars);
     if (overPrice != null && underPrice != null) {
       priceMap.set(`${away}|${home}`, { overPrice, underPrice });
+      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
+    } else {
+      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=BAD_PRICE_DATA strike=${best.floor_strike} yes=${best.yes_bid_dollars} no=${best.no_bid_dollars}`);
     }
   }
 
@@ -1153,6 +1182,7 @@ async function getTodayGames(opts = {}) {
     const oddsKey = `${away}|${home}`;
     const odds = oddsMap[oddsKey];
     const kalshi = kalshiPrices.get(oddsKey);
+    console.log(`[KALSHI-DEBUG] ${away} @ ${home} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
     const stadiumNotes = STADIUM_NOTES[venue];
     const isOverLean = OVER_LEANS.includes(analysis.lean);
     const edge = detectEdge(analysis.lean, kalshi, venue);
