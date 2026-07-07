@@ -154,182 +154,242 @@ function buildEmailHTML() {
   const subject = `MLB Bot — ${today} | ${picksCount} picks today | Streak: ${streak}`;
   const resolvedCount = getResolvedPicksCount();
 
-  let html = `
-<!DOCTYPE html>
+  const FONT = 'font-family: Arial, Helvetica, sans-serif;';
+  const TEXT = 'color:#222222;';
+  const MUTED = 'color:#666666;';
+
+  const pnlColor = (pnl) => parseFloat(pnl) >= 0 ? '#2e7d32' : '#c62828';
+  const hitMissColor = (hm) => hm === 'HIT' ? '#2e7d32' : (hm === 'MISS' ? '#c62828' : '#757575');
+  const sideColor = (side) => side === 'OVER' ? '#2e7d32' : '#c62828';
+
+  const sectionHeader = (title) => `
+        <tr>
+          <td style="padding: 20px 0 10px 0; border-bottom: 2px solid #16324f;">
+            <span style="${FONT} font-size:16px; font-weight:bold; color:#16324f;">${title}</span>
+          </td>
+        </tr>`;
+
+  const emptyRow = (text) => `
+        <tr>
+          <td style="padding: 10px 0 0 0;">
+            <span style="${FONT} font-size:13px; ${MUTED}">${text}</span>
+          </td>
+        </tr>`;
+
+  const resultCardRow = (pick) => {
+    const pnl = parseFloat(pick.PnL) || 0;
+    return `
+        <tr>
+          <td style="padding: 6px 0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="border-left: 4px solid ${sideColor(pick.Side)}; background-color:#f7f7f7; padding: 10px 12px;">
+                  <span style="${FONT} font-size:14px; ${TEXT} font-weight:bold;">${pick.Game}</span>
+                  <span style="${FONT} font-size:13px; ${MUTED}"> | ${displayLean(pick.Lean)}</span><br>
+                  <span style="${FONT} font-size:13px; ${TEXT}">${pick.Side} vs ${pick.Total_Line} &rarr; ${pick.Result} &rarr; <strong>${pick.Hit_Miss}</strong></span>
+                  <span style="${FONT} font-size:13px; font-weight:bold; color:${hitMissColor(pick.Hit_Miss)};"> (${pnl >= 0 ? '+' : ''}${pnl})</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>`;
+  };
+
+  const pickCardRow = (pick) => {
+    const hasReasoning = pick.Signal_Fact || pick.Market_Fact || pick.Risk_Fact;
+    const reasoningHtml = hasReasoning
+      ? `<br>
+                  <span style="${FONT} font-size:12.5px; ${TEXT}">${pick.Signal_Fact || 'Signal detail not available for this pick.'}</span><br>
+                  <span style="${FONT} font-size:12.5px; ${TEXT}">${pick.Market_Fact || 'Market comparison not available for this pick.'}</span><br>
+                  <span style="${FONT} font-size:12.5px; ${TEXT}">${pick.Risk_Fact || 'Risk factor not available for this pick.'}</span>`
+      : `<br>
+                  <span style="${FONT} font-size:12.5px; ${MUTED}">Detailed reasoning not available (logged before reasoning tracking began).</span>`;
+    return `
+        <tr>
+          <td style="padding: 6px 0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="border-left: 4px solid ${sideColor(pick.Side)}; background-color:#f7f7f7; padding: 10px 12px;">
+                  <span style="${FONT} font-size:14px; ${TEXT} font-weight:bold;">${pick.Game}</span>
+                  <span style="${FONT} font-size:12.5px; ${MUTED}"> [${pick.Edge_Label}]</span><br>
+                  <span style="${FONT} font-size:13px; ${TEXT}">${displayLean(pick.Lean)} | Line: ${pick.Total_Line}</span><br>
+                  <span style="${FONT} font-size:13px; ${TEXT}">Kalshi: <strong>${pick.Side_Juice}</strong> juice</span>
+                  ${reasoningHtml}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>`;
+  };
+
+  let html = `<!DOCTYPE html>
 <html>
 <head>
-  <style>
-    body { font-family: monospace; line-height: 1.6; background: #1e1e1e; color: #d4d4d4; margin: 0; padding: 20px; }
-    .container { max-width: 800px; margin: 0 auto; background: #2d2d2d; padding: 20px; border-radius: 5px; }
-    .header { color: #4ec9b0; font-size: 18px; font-weight: bold; margin-bottom: 20px; border-bottom: 2px solid #4ec9b0; padding-bottom: 10px; }
-    .section { margin-bottom: 30px; }
-    .section-title { color: #569cd6; font-weight: bold; font-size: 14px; margin-top: 20px; margin-bottom: 10px; }
-    .pick-row { background: #1e1e1e; padding: 8px; margin: 5px 0; border-left: 3px solid #4ec9b0; }
-    .hit { border-left-color: #4ec9b0; }
-    .miss { border-left-color: #ce9178; }
-    .push { border-left-color: #d7ba7d; }
-    .stat-row { padding: 5px 0; }
-    .stat-label { color: #9cdcfe; display: inline-block; width: 180px; }
-    .stat-value { color: #b5cea8; font-weight: bold; }
-    .positive { color: #4ec9b0; }
-    .negative { color: #ce9178; }
-    table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-    th, td { padding: 8px; text-align: left; border-bottom: 1px solid #444; }
-    th { background: #3e3e3e; color: #569cd6; font-weight: bold; }
-    td { background: #252525; }
-    .notice-banner { background: #3a2f00; border: 2px solid #d7ba7d; color: #ffd866; padding: 12px; margin-bottom: 20px; border-radius: 4px; font-weight: bold; }
-    .milestone-line { margin-top: 8px; color: #9cdcfe; font-weight: normal; }
-    .reasoning { margin-top: 8px; font-size: 0.9em; color: #d4d4d4; font-weight: normal; }
-    .reasoning div { margin: 3px 0; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLB Bot Report</title>
 </head>
-<body>
-<div class="container">
-  <div class="header">⚾ MLB BOT REPORT — ${today}</div>
-  <div class="notice-banner">
-    ${PAPER_TRADING_NOTICE}
-    <div class="milestone-line">${regressionMilestoneLine(resolvedCount)}</div>
-  </div>
-`;
-
-  // Yesterday's Results Section
-  html += `
-  <div class="section">
-    <div class="section-title">📊 YESTERDAY'S RESULTS (${yesterday})</div>
-`;
+<body style="margin:0; padding:0; background-color:#ffffff;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#ffffff;">
+  <tr>
+    <td align="center" style="padding: 20px 10px;">
+      <table role="presentation" width="700" cellpadding="0" cellspacing="0" border="0" style="width:700px; max-width:700px; background-color:#ffffff;">
+        <tr>
+          <td style="padding-bottom:16px; border-bottom:2px solid #16324f;">
+            <span style="${FONT} font-size:20px; font-weight:bold; color:#16324f;">MLB BOT REPORT — ${today}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 16px; background-color:#fff8e1; border:1px solid #e0c46c;">
+            <span style="${FONT} font-size:13px; font-weight:bold; color:#6b5900;">${PAPER_TRADING_NOTICE}</span><br>
+            <span style="${FONT} font-size:13px; color:#6b5900;">${regressionMilestoneLine(resolvedCount)}</span>
+          </td>
+        </tr>
+${sectionHeader(`YESTERDAY'S RESULTS (${yesterday})`)}`;
 
   if (yesterdayStats) {
     html += `
-    <div class="stat-row">
-      <span class="stat-label">Picks Resolved:</span>
-      <span class="stat-value">${yesterdayStats.hits}/${yesterdayStats.total}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Hit Rate:</span>
-      <span class="stat-value">${yesterdayStats.hitRate}%</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">P&L:</span>
-      <span class="stat-value ${yesterdayStats.totalPnL >= 0 ? 'positive' : 'negative'}">${yesterdayStats.totalPnL >= 0 ? '+' : ''}${yesterdayStats.totalPnL}</span>
-    </div>
-    <br>
-`;
-
-    yesterdayPicks.forEach(pick => {
-      const hitClass = pick.Hit_Miss === 'HIT' ? 'hit' : (pick.Hit_Miss === 'MISS' ? 'miss' : 'push');
-      const pnl = parseFloat(pick.PnL) || 0;
-      html += `
-    <div class="pick-row ${hitClass}">
-      <strong>${pick.Game}</strong> | ${displayLean(pick.Lean)}<br>
-      ${pick.Side} vs ${pick.Total_Line} → ${pick.Result} → <strong>${pick.Hit_Miss}</strong>
-      <span class="stat-value ${pnl >= 0 ? 'positive' : 'negative'}">(${pnl >= 0 ? '+' : ''}${pnl})</span>
-    </div>
-`;
-    });
+        <tr>
+          <td style="padding: 10px 0 4px 0;">
+            <span style="${FONT} font-size:13px; ${TEXT}">Picks Resolved: <strong>${yesterdayStats.hits}/${yesterdayStats.total}</strong> &nbsp;|&nbsp; Hit Rate: <strong>${yesterdayStats.hitRate}%</strong> &nbsp;|&nbsp; P&amp;L: <strong style="color:${pnlColor(yesterdayStats.totalPnL)};">${yesterdayStats.totalPnL >= 0 ? '+' : ''}${yesterdayStats.totalPnL}</strong></span>
+          </td>
+        </tr>`;
+    yesterdayPicks.forEach(pick => { html += resultCardRow(pick); });
   } else {
-    html += `<p style="color: #808080;">No results from yesterday.</p>`;
+    html += emptyRow('No results from yesterday.');
   }
 
-  html += `</div>`;
-
-  // Today's Picks Section
-  html += `
-  <div class="section">
-    <div class="section-title">🎯 TODAY'S PICKS (${today})</div>
-`;
+  html += sectionHeader(`TODAY'S PICKS (${today})`);
 
   if (todayPicks.length === 0) {
-    html += `<p style="color: #808080;">No TARGET or PRIME TARGET calls today.</p>`;
+    html += emptyRow('No TARGET or PRIME TARGET calls today.');
   } else {
-    todayPicks.forEach(pick => {
-      const hasReasoning = pick.Signal_Fact || pick.Market_Fact || pick.Risk_Fact;
-      html += `
-    <div class="pick-row hit">
-      <strong>${pick.Game}</strong> [${pick.Edge_Label}]<br>
-      ${displayLean(pick.Lean)} | Line: ${pick.Total_Line}<br>
-      Kalshi: <span class="stat-value">${pick.Side_Juice}</span> juice
-      <div class="reasoning">
-`;
-      if (hasReasoning) {
-        html += `        <div>${pick.Signal_Fact || 'Signal detail not available for this pick.'}</div>
-        <div>${pick.Market_Fact || 'Market comparison not available for this pick.'}</div>
-        <div>${pick.Risk_Fact || 'Risk factor not available for this pick.'}</div>
-`;
-      } else {
-        html += `        <div style="color: #808080;">Detailed reasoning not available (logged before reasoning tracking began).</div>
-`;
-      }
-      html += `      </div>
-    </div>
-`;
-    });
+    todayPicks.forEach(pick => { html += pickCardRow(pick); });
   }
 
-  html += `</div>`;
-
-  // Overall Summary Section
-  html += `
-  <div class="section">
-    <div class="section-title">📈 OVERALL SUMMARY</div>
-`;
+  html += sectionHeader('OVERALL SUMMARY');
 
   if (overallStats) {
     html += `
-    <div class="stat-row">
-      <span class="stat-label">Total Picks Made:</span>
-      <span class="stat-value">${overallStats.totalPicks}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Overall Hit Rate:</span>
-      <span class="stat-value">${overallStats.hits}/${overallStats.resolvedPicks} (${overallStats.hitRate}%)</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Total P&L:</span>
-      <span class="stat-value ${overallStats.totalPnL >= 0 ? 'positive' : 'negative'}">${overallStats.totalPnL >= 0 ? '+' : ''}${overallStats.totalPnL}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Current Streak:</span>
-      <span class="stat-value">${overallStats.streak}</span>
-    </div>
-
-    <div style="margin-top: 15px;">
-      <div style="color: #569cd6; font-weight: bold; margin-bottom: 8px;">Hit Rate by Lean:</div>
-      <table>
         <tr>
-          <th>Lean Type</th>
-          <th>Record</th>
-          <th>Hit Rate</th>
-          <th>P&L</th>
+          <td style="padding: 10px 0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Total Picks Made:</td><td style="${FONT} font-size:13px; ${TEXT} font-weight:bold; padding:3px 0;" align="right">${overallStats.totalPicks}</td></tr>
+              <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Overall Hit Rate:</td><td style="${FONT} font-size:13px; ${TEXT} font-weight:bold; padding:3px 0;" align="right">${overallStats.hits}/${overallStats.resolvedPicks} (${overallStats.hitRate}%)</td></tr>
+              <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Total P&amp;L:</td><td style="${FONT} font-size:13px; font-weight:bold; padding:3px 0; color:${pnlColor(overallStats.totalPnL)};" align="right">${overallStats.totalPnL >= 0 ? '+' : ''}${overallStats.totalPnL}</td></tr>
+              <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Current Streak:</td><td style="${FONT} font-size:13px; ${TEXT} font-weight:bold; padding:3px 0;" align="right">${overallStats.streak}</td></tr>
+            </table>
+          </td>
         </tr>
-`;
+        <tr>
+          <td style="padding: 10px 0 6px 0;">
+            <span style="${FONT} font-size:13px; font-weight:bold; ${TEXT}">Hit Rate by Lean</span>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; border:1px solid #dddddd;">
+              <tr>
+                <td style="${FONT} font-size:12.5px; font-weight:bold; color:#16324f; background-color:#f0f0f0; border:1px solid #dddddd; padding:6px 8px;">Lean Type</td>
+                <td style="${FONT} font-size:12.5px; font-weight:bold; color:#16324f; background-color:#f0f0f0; border:1px solid #dddddd; padding:6px 8px;">Record</td>
+                <td style="${FONT} font-size:12.5px; font-weight:bold; color:#16324f; background-color:#f0f0f0; border:1px solid #dddddd; padding:6px 8px;">Hit Rate</td>
+                <td style="${FONT} font-size:12.5px; font-weight:bold; color:#16324f; background-color:#f0f0f0; border:1px solid #dddddd; padding:6px 8px;">P&amp;L</td>
+              </tr>`;
 
     for (const [lean, stats] of Object.entries(overallStats.leanStats)) {
       html += `
-        <tr>
-          <td>${displayLean(lean)}</td>
-          <td>${stats.hits}/${stats.total}</td>
-          <td>${stats.hitRate}%</td>
-          <td><span class="${stats.pnl >= 0 ? 'positive' : 'negative'}">${stats.pnl >= 0 ? '+' : ''}${stats.pnl}</span></td>
-        </tr>
-`;
+              <tr>
+                <td style="${FONT} font-size:12.5px; ${TEXT} border:1px solid #dddddd; padding:6px 8px;">${displayLean(lean)}</td>
+                <td style="${FONT} font-size:12.5px; ${TEXT} border:1px solid #dddddd; padding:6px 8px;">${stats.hits}/${stats.total}</td>
+                <td style="${FONT} font-size:12.5px; ${TEXT} border:1px solid #dddddd; padding:6px 8px;">${stats.hitRate}%</td>
+                <td style="${FONT} font-size:12.5px; font-weight:bold; color:${pnlColor(stats.pnl)}; border:1px solid #dddddd; padding:6px 8px;">${stats.pnl >= 0 ? '+' : ''}${stats.pnl}</td>
+              </tr>`;
     }
 
     html += `
-      </table>
-    </div>
-`;
+            </table>
+          </td>
+        </tr>`;
   } else {
-    html += `<p style="color: #808080;">No resolved picks yet.</p>`;
+    html += emptyRow('No resolved picks yet.');
   }
 
   html += `
-  </div>
-</div>
+      </table>
+    </td>
+  </tr>
+</table>
 </body>
 </html>
 `;
 
   return { subject, html };
+}
+
+function buildEmailText() {
+  const yesterday = getYesterdayString();
+  const today = getTodayString();
+  const { picks: yesterdayPicks, stats: yesterdayStats } = getYesterdaysResults();
+  const todayPicks = getTodaysPicks();
+  const overallStats = getOverallStats();
+  const resolvedCount = getResolvedPicksCount();
+
+  const rule = '='.repeat(40);
+  const lines = [];
+
+  lines.push(`MLB BOT REPORT — ${today}`, '');
+  lines.push(PAPER_TRADING_NOTICE);
+  lines.push(regressionMilestoneLine(resolvedCount), '');
+
+  lines.push(rule, `YESTERDAY'S RESULTS (${yesterday})`, rule);
+  if (yesterdayStats) {
+    lines.push(`Picks Resolved: ${yesterdayStats.hits}/${yesterdayStats.total}`);
+    lines.push(`Hit Rate: ${yesterdayStats.hitRate}%`);
+    lines.push(`P&L: ${yesterdayStats.totalPnL >= 0 ? '+' : ''}${yesterdayStats.totalPnL}`, '');
+    yesterdayPicks.forEach(pick => {
+      const pnl = parseFloat(pick.PnL) || 0;
+      lines.push(`- ${pick.Game} | ${displayLean(pick.Lean)}`);
+      lines.push(`  ${pick.Side} vs ${pick.Total_Line} -> ${pick.Result} -> ${pick.Hit_Miss} (${pnl >= 0 ? '+' : ''}${pnl})`);
+    });
+  } else {
+    lines.push('No results from yesterday.');
+  }
+  lines.push('');
+
+  lines.push(rule, `TODAY'S PICKS (${today})`, rule);
+  if (todayPicks.length === 0) {
+    lines.push('No TARGET or PRIME TARGET calls today.');
+  } else {
+    todayPicks.forEach(pick => {
+      lines.push(`- ${pick.Game} [${pick.Edge_Label}]`);
+      lines.push(`  ${displayLean(pick.Lean)} | Line: ${pick.Total_Line}`);
+      lines.push(`  Kalshi: ${pick.Side_Juice} juice`);
+      if (pick.Signal_Fact || pick.Market_Fact || pick.Risk_Fact) {
+        lines.push(`  ${pick.Signal_Fact || 'Signal detail not available for this pick.'}`);
+        lines.push(`  ${pick.Market_Fact || 'Market comparison not available for this pick.'}`);
+        lines.push(`  ${pick.Risk_Fact || 'Risk factor not available for this pick.'}`);
+      } else {
+        lines.push('  Detailed reasoning not available (logged before reasoning tracking began).');
+      }
+      lines.push('');
+    });
+  }
+
+  lines.push(rule, 'OVERALL SUMMARY', rule);
+  if (overallStats) {
+    lines.push(`Total Picks Made: ${overallStats.totalPicks}`);
+    lines.push(`Overall Hit Rate: ${overallStats.hits}/${overallStats.resolvedPicks} (${overallStats.hitRate}%)`);
+    lines.push(`Total P&L: ${overallStats.totalPnL >= 0 ? '+' : ''}${overallStats.totalPnL}`);
+    lines.push(`Current Streak: ${overallStats.streak}`, '');
+    lines.push('Hit Rate by Lean:');
+    for (const [lean, stats] of Object.entries(overallStats.leanStats)) {
+      lines.push(`  ${displayLean(lean).padEnd(16)}: ${stats.hits}/${stats.total} (${stats.hitRate}%) | P&L: ${stats.pnl >= 0 ? '+' : ''}${stats.pnl}`);
+    }
+  } else {
+    lines.push('No resolved picks yet.');
+  }
+
+  return lines.join('\n');
 }
 
 async function sendEmailReport(opts = {}) {
@@ -367,6 +427,7 @@ async function sendEmailReport(opts = {}) {
   });
 
   const { subject, html } = buildEmailHTML();
+  const text = buildEmailText();
 
   try {
     console.log(`Connecting to Gmail SMTP...`);
@@ -374,6 +435,7 @@ async function sendEmailReport(opts = {}) {
       from: user,
       to,
       subject,
+      text,
       html,
     });
     console.log(`✓ Email sent successfully to ${to}`);
