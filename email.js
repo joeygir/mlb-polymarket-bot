@@ -17,6 +17,21 @@ function getResolvedPicksCount() {
   return rows.filter(r => r.Hit_Miss && r.Hit_Miss !== 'PUSH').length;
 }
 
+// Display-only relabeling — the underlying Lean values in picks_log.csv and
+// the scoring logic that produces them are untouched.
+const LEAN_DISPLAY_NAMES = {
+  'STRONG OVER': 'CONFIDENT OVER',
+  'OVER': 'SOLID OVER',
+  'LEAN OVER': 'POSSIBLE OVER',
+  'STRONG UNDER': 'CONFIDENT UNDER',
+  'UNDER': 'SOLID UNDER',
+  'LEAN UNDER': 'POSSIBLE UNDER',
+};
+
+function displayLean(lean) {
+  return LEAN_DISPLAY_NAMES[lean] || lean;
+}
+
 function parseCSV(content) {
   const lines = content.trim().split('\n').filter(Boolean);
   if (lines.length < 1) return { headers: [], rows: [] };
@@ -164,6 +179,8 @@ function buildEmailHTML() {
     td { background: #252525; }
     .notice-banner { background: #3a2f00; border: 2px solid #d7ba7d; color: #ffd866; padding: 12px; margin-bottom: 20px; border-radius: 4px; font-weight: bold; }
     .milestone-line { margin-top: 8px; color: #9cdcfe; font-weight: normal; }
+    .reasoning { margin-top: 8px; font-size: 0.9em; color: #d4d4d4; font-weight: normal; }
+    .reasoning div { margin: 3px 0; }
   </style>
 </head>
 <body>
@@ -203,7 +220,7 @@ function buildEmailHTML() {
       const pnl = parseFloat(pick.PnL) || 0;
       html += `
     <div class="pick-row ${hitClass}">
-      <strong>${pick.Game}</strong> | ${pick.Lean}<br>
+      <strong>${pick.Game}</strong> | ${displayLean(pick.Lean)}<br>
       ${pick.Side} vs ${pick.Total_Line} → ${pick.Result} → <strong>${pick.Hit_Miss}</strong>
       <span class="stat-value ${pnl >= 0 ? 'positive' : 'negative'}">(${pnl >= 0 ? '+' : ''}${pnl})</span>
     </div>
@@ -225,11 +242,24 @@ function buildEmailHTML() {
     html += `<p style="color: #808080;">No TARGET or PRIME TARGET calls today.</p>`;
   } else {
     todayPicks.forEach(pick => {
+      const hasReasoning = pick.Signal_Fact || pick.Market_Fact || pick.Risk_Fact;
       html += `
     <div class="pick-row hit">
       <strong>${pick.Game}</strong> [${pick.Edge_Label}]<br>
-      ${pick.Lean} | Line: ${pick.Total_Line}<br>
+      ${displayLean(pick.Lean)} | Line: ${pick.Total_Line}<br>
       Kalshi: <span class="stat-value">${pick.Side_Juice}</span> juice
+      <div class="reasoning">
+`;
+      if (hasReasoning) {
+        html += `        <div>${pick.Signal_Fact || 'Signal detail not available for this pick.'}</div>
+        <div>${pick.Market_Fact || 'Market comparison not available for this pick.'}</div>
+        <div>${pick.Risk_Fact || 'Risk factor not available for this pick.'}</div>
+`;
+      } else {
+        html += `        <div style="color: #808080;">Detailed reasoning not available (logged before reasoning tracking began).</div>
+`;
+      }
+      html += `      </div>
     </div>
 `;
     });
@@ -276,7 +306,7 @@ function buildEmailHTML() {
     for (const [lean, stats] of Object.entries(overallStats.leanStats)) {
       html += `
         <tr>
-          <td>${lean}</td>
+          <td>${displayLean(lean)}</td>
           <td>${stats.hits}/${stats.total}</td>
           <td>${stats.hitRate}%</td>
           <td><span class="${stats.pnl >= 0 ? 'positive' : 'negative'}">${stats.pnl >= 0 ? '+' : ''}${stats.pnl}</span></td>

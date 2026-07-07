@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const { sendEmailReport, testEmailReport } = require('./email');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
-const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL'];
+const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact'];
 
 const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
 const REGRESSION_MILESTONE_TARGET = 200;
@@ -45,11 +45,15 @@ function rowToCSV(row, headers) {
 
 const OVER_LEANS = ['STRONG OVER','OVER','LEAN OVER','DOME — LEAN OVER'];
 
-function logPick(date, game, lean, confidence, edgeLabel, odds) {
+function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}) {
   const isOver = OVER_LEANS.includes(lean);
   const side = isOver ? 'OVER' : 'UNDER';
   const sideJuice = isOver ? odds.overJuice : odds.underJuice;
-  const newRow = { Date: date, Game: game, Lean: lean, Confidence: confidence, Edge_Label: edgeLabel, Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '' };
+  const newRow = {
+    Date: date, Game: game, Lean: lean, Confidence: confidence, Edge_Label: edgeLabel,
+    Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '',
+    Signal_Fact: reasoning.signalFact || '', Market_Fact: reasoning.marketFact || '', Risk_Fact: reasoning.riskFact || '',
+  };
 
   if (!fs.existsSync(PICKS_LOG)) {
     fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rowToCSV(newRow, CSV_HEADERS) + '\n');
@@ -60,14 +64,18 @@ function logPick(date, game, lean, confidence, edgeLabel, odds) {
 
   if (rows.some(r => r.Date === date && r.Game === game)) return;
 
-  const hasSide = headers.includes('Side');
-  const hasConfidence = headers.includes('Confidence');
+  // Backfill any column that didn't exist yet when older rows were written
+  // (Side/Confidence historically, Signal_Fact/Market_Fact/Risk_Fact now).
+  const missingCols = CSV_HEADERS.filter(h => !headers.includes(h));
 
-  if (!hasSide || !hasConfidence) {
+  if (missingCols.length > 0) {
     const migrated = rows.map(r => ({
       ...r,
-      Side: hasSide ? r.Side : (OVER_LEANS.includes(r.Lean) ? 'OVER' : 'UNDER'),
-      Confidence: hasConfidence ? r.Confidence : '',
+      Side: headers.includes('Side') ? r.Side : (OVER_LEANS.includes(r.Lean) ? 'OVER' : 'UNDER'),
+      Confidence: headers.includes('Confidence') ? r.Confidence : '',
+      Signal_Fact: headers.includes('Signal_Fact') ? r.Signal_Fact : '',
+      Market_Fact: headers.includes('Market_Fact') ? r.Market_Fact : '',
+      Risk_Fact: headers.includes('Risk_Fact') ? r.Risk_Fact : '',
     }));
     migrated.push(newRow);
     fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + migrated.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
@@ -1091,6 +1099,25 @@ function marketSentence(kalshi, isOverLean) {
     : `Market: Kalshi favors the ${kalshiSide} (Over ${fmt(overPrice)} / Under ${fmt(underPrice)}), conflicting with the bot's lean.`;
 }
 
+// Surfaces the strongest signal pointing the other way as the pick's main
+// risk. Falls back to park-level wind unreliability, then confidence tier,
+// then a generic caveat — always grounded in this game's real weighted
+// signals, never a fabricated or generic-only claim.
+function riskFactorFact(weighted, isOverLean, stadiumNotes, isDome, confidence) {
+  const pickDir = isOverLean ? 'OVER' : 'UNDER';
+  const opposing = (weighted || []).filter(w => w.direction !== pickDir).sort((a, b) => b.weight - a.weight);
+  if (opposing.length) {
+    return `Biggest risk: ${opposing[0].text}, a signal pointing the other way that could still flip this total.`;
+  }
+  if (!isDome && stadiumNotes?.windReliability && stadiumNotes.windReliability !== 'HIGH') {
+    return `Biggest risk: wind at this park is ${stadiumNotes.windReliability.toLowerCase()}-reliability, so the forecast behind this call may not match what actually happens in-stadium.`;
+  }
+  if (confidence !== 'HIGH') {
+    return `Biggest risk: confidence is only ${confidence}, meaning fewer signals lined up behind this call than an ideal setup.`;
+  }
+  return `Biggest risk: no clear counter-signal fired, but a single bad bullpen inning or late weather shift could still flip a total this close.`;
+}
+
 function printExplain({ away, home, venue, awayPitcher, homePitcher, awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, weather, stadiumNotes, odds, kalshi, analysis, edge }) {
   const pf = stadiumNotes?.parkFactor;
 
@@ -1213,7 +1240,15 @@ async function getTodayGames(opts = {}) {
 
     const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
     if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
-      logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds);
+      const isDome = !coords?.outDirs;
+      const signalFact = pitcherFact(awayStats, homeStats, awayPitcher, homePitcher, isOverLean)
+        || parkFactorFact(stadiumNotes, venue, isOverLean)
+        || windFact(weather, coords, stadiumNotes, venue, isOverLean)
+        || opsFact(awayHitters, homeHitters, away, home, isOverLean)
+        || 'No single dominant signal — the call comes from several smaller factors combined.';
+      const marketFact = marketSentence(kalshi, isOverLean);
+      const riskFact = riskFactorFact(analysis.weighted, isOverLean, stadiumNotes, isDome, analysis.confidence);
+      logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds, { signalFact, marketFact, riskFact });
     }
 
     if (explain) {
