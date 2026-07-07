@@ -867,6 +867,21 @@ function signKalshiRequest(method, pathWithPrefix) {
   };
 }
 
+// Confirms the private key loads and can actually produce an RSA-PSS signature
+// — a local check, no network call — so a bad/missing KALSHI_PRIVATE_KEY env
+// var on Railway shows up immediately in the deploy logs instead of surfacing
+// later as silent "No Kalshi market found" results.
+function verifyKalshiAuth() {
+  try {
+    signKalshiRequest('GET', `${KALSHI_PATH_PREFIX}/markets`);
+    console.log('Kalshi auth: OK');
+    return true;
+  } catch (err) {
+    console.log(`Kalshi auth: FAILED - check KALSHI_PRIVATE_KEY env var (${err.message})`);
+    return false;
+  }
+}
+
 async function kalshiGet(pathNoQuery, params) {
   const headers = signKalshiRequest('GET', pathNoQuery);
   const res = await axios.get(`${KALSHI_API_BASE}${pathNoQuery}`, { headers, params });
@@ -1420,6 +1435,9 @@ async function runScheduledTask(name, task) {
 
 function runDaemon() {
   if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+
+  const kalshiAuthOk = verifyKalshiAuth();
+  appendDaemonLog(kalshiAuthOk ? 'Kalshi auth: OK' : 'Kalshi auth: FAILED - check KALSHI_PRIVATE_KEY env var');
 
   const now = new Date();
   const dayOfWeek = now.getUTCDay();

@@ -226,12 +226,8 @@ function buildEmailHTML() {
   if (overallStats) {
     html += `
     <div class="stat-row">
-      <span class="stat-label">Total Picks Logged:</span>
+      <span class="stat-label">Total Picks Made:</span>
       <span class="stat-value">${overallStats.totalPicks}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Picks Resolved:</span>
-      <span class="stat-value">${overallStats.resolvedPicks}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Overall Hit Rate:</span>
