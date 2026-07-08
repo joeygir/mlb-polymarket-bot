@@ -950,7 +950,7 @@ async function getKalshiMLBPrices(games, today) {
     const data = await kalshiGet(`${KALSHI_PATH_PREFIX}/markets`, { status: 'open', limit: 1000, series_ticker: 'KXMLBTOTAL' });
     markets = data?.markets || [];
   } catch (err) {
-    console.log(`[KALSHI-DEBUG] Failed to fetch Kalshi markets: ${err.message}`);
+    appendDaemonLog(`[KALSHI-DEBUG] Failed to fetch Kalshi markets: ${err.message}`);
     return priceMap;
   }
 
@@ -958,7 +958,7 @@ async function getKalshiMLBPrices(games, today) {
     const label = `${away} @ ${home}`;
 
     if (!awayAbbr || !homeAbbr) {
-      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=no (missing team abbreviation) | result=SKIPPED`);
+      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=no (missing team abbreviation) | result=SKIPPED`);
       continue;
     }
 
@@ -968,7 +968,7 @@ async function getKalshiMLBPrices(games, today) {
     );
 
     if (!gameMarkets.length) {
-      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_TICKER_MATCH (0 markets found for date token ${todayToken})`);
+      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_TICKER_MATCH (0 markets found for date token ${todayToken})`);
       continue;
     }
 
@@ -993,7 +993,7 @@ async function getKalshiMLBPrices(games, today) {
     }
 
     if (!best) {
-      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_USABLE_STRIKE (${gameMarkets.length} markets found, none had usable pricing)`);
+      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_USABLE_STRIKE (${gameMarkets.length} markets found, none had usable pricing)`);
       continue;
     }
 
@@ -1002,9 +1002,9 @@ async function getKalshiMLBPrices(games, today) {
     const underPrice = kalshiDollarsToDecimal(best.no_bid_dollars);
     if (overPrice != null && underPrice != null) {
       priceMap.set(`${away}|${home}`, { overPrice, underPrice });
-      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
+      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
     } else {
-      console.log(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=BAD_PRICE_DATA strike=${best.floor_strike} yes=${best.yes_bid_dollars} no=${best.no_bid_dollars}`);
+      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=BAD_PRICE_DATA strike=${best.floor_strike} yes=${best.yes_bid_dollars} no=${best.no_bid_dollars}`);
     }
   }
 
@@ -1233,7 +1233,7 @@ async function getTodayGames(opts = {}) {
     const oddsKey = `${away}|${home}`;
     const odds = oddsMap[oddsKey];
     const kalshi = kalshiPrices.get(oddsKey);
-    console.log(`[KALSHI-DEBUG] ${away} @ ${home} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
+    appendDaemonLog(`[KALSHI-DEBUG] ${away} @ ${home} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
     const stadiumNotes = STADIUM_NOTES[venue];
     const isOverLean = OVER_LEANS.includes(analysis.lean);
     const edge = detectEdge(analysis.lean, kalshi, venue);
@@ -1447,6 +1447,7 @@ function getDayName(dayOfWeek) {
 }
 
 function appendDaemonLog(message) {
+  if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
   fs.appendFileSync(DAEMON_LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
 }
 
