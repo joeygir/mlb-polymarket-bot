@@ -1446,6 +1446,57 @@ function getDayName(dayOfWeek) {
   return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek];
 }
 
+// Getaway-day slates (early businessman's-special starts, common on travel
+// days) can be well underway or even over before the fixed morning-analysis
+// time — e.g. a 12:35pm ET first pitch is already past the 16:00 UTC/noon ET
+// weekday run, and the 23:00 UTC/7pm ET pregame run happens after the game
+// has ended, so it never gets a properly-timed pass either way. This looks
+// up the day's actual earliest first pitch and, if it's earlier than the
+// scheduled morning-analysis time can front-run with a reasonable buffer,
+// moves that run earlier so it still catches the game with real odds/Kalshi
+// data available. Never pushes the run later than its normal fixed time.
+const EARLY_PITCH_LEAD_MINUTES = 90;
+const EARLY_PITCH_FLOOR_UTC_MINUTES = 9 * 60; // never earlier than 09:00 UTC (05:00 ET)
+
+let earliestPitchCache = null; // { date: 'YYYY-MM-DD', earliestUTCMinutes: number|null }
+
+async function getEarliestFirstPitchUTCMinutes(dateStr) {
+  if (earliestPitchCache?.date === dateStr) return earliestPitchCache.earliestUTCMinutes;
+
+  let earliestUTCMinutes = null;
+  try {
+    const res = await axios.get(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${dateStr}`);
+    const games = res.data.dates[0]?.games || [];
+    const dateStartMs = new Date(`${dateStr}T00:00:00Z`).getTime();
+    for (const g of games) {
+      // Minutes since the start of dateStr's UTC day, not hour-of-day — an ET
+      // evening game (e.g. 8:05pm ET) lands on the *next* UTC calendar day
+      // and must not wrap back around to look like an early-morning start.
+      const minutes = Math.round((new Date(g.gameDate).getTime() - dateStartMs) / 60000);
+      if (earliestUTCMinutes == null || minutes < earliestUTCMinutes) earliestUTCMinutes = minutes;
+    }
+  } catch {
+    earliestUTCMinutes = null;
+  }
+
+  earliestPitchCache = { date: dateStr, earliestUTCMinutes };
+  return earliestUTCMinutes;
+}
+
+async function applyGetawayDayAdjustment(schedule, dateStr) {
+  const earliestUTCMinutes = await getEarliestFirstPitchUTCMinutes(dateStr);
+  if (earliestUTCMinutes == null) return schedule;
+
+  const desiredMinutes = Math.max(earliestUTCMinutes - EARLY_PITCH_LEAD_MINUTES, EARLY_PITCH_FLOOR_UTC_MINUTES);
+
+  return schedule.map(entry => {
+    if (entry.name !== 'morning-analysis') return entry;
+    const entryMinutes = entry.hour * 60 + entry.minute;
+    if (desiredMinutes >= entryMinutes) return entry;
+    return { ...entry, hour: Math.floor(desiredMinutes / 60), minute: desiredMinutes % 60 };
+  });
+}
+
 function appendDaemonLog(message) {
   if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
   fs.appendFileSync(DAEMON_LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
@@ -1497,22 +1548,36 @@ function runDaemon() {
   console.log(`Daemon started (${dayName}). Checking schedule every 60s — ${scheduleTimes} UTC.`);
 
   let lastTriggeredKey = null;
+  let lastLoggedAdjustmentDate = null;
 
   setInterval(() => {
-    const now = new Date();
-    const hour = now.getUTCHours();
-    const minute = now.getUTCMinutes();
-    const dayOfWeek = now.getUTCDay();
-    const schedule = getScheduleForDay(dayOfWeek);
+    (async () => {
+      const now = new Date();
+      const hour = now.getUTCHours();
+      const minute = now.getUTCMinutes();
+      const dayOfWeek = now.getUTCDay();
+      const dateStr = now.toISOString().split('T')[0];
+      const baseSchedule = getScheduleForDay(dayOfWeek);
+      const schedule = await applyGetawayDayAdjustment(baseSchedule, dateStr);
 
-    const match = schedule.find(s => s.hour === hour && s.minute === minute);
-    if (!match) return;
+      if (lastLoggedAdjustmentDate !== dateStr) {
+        const base = baseSchedule.find(s => s.name === 'morning-analysis');
+        const adjusted = schedule.find(s => s.name === 'morning-analysis');
+        if (base && adjusted && (base.hour !== adjusted.hour || base.minute !== adjusted.minute)) {
+          appendDaemonLog(`Getaway-day adjustment: morning-analysis moved from ${String(base.hour).padStart(2, '0')}:${String(base.minute).padStart(2, '0')} to ${String(adjusted.hour).padStart(2, '0')}:${String(adjusted.minute).padStart(2, '0')} UTC (early first pitch detected)`);
+        }
+        lastLoggedAdjustmentDate = dateStr;
+      }
 
-    const key = `${now.toISOString().split('T')[0]}-${match.name}`;
-    if (key === lastTriggeredKey) return;
-    lastTriggeredKey = key;
+      const match = schedule.find(s => s.hour === hour && s.minute === minute);
+      if (!match) return;
 
-    runScheduledTask(match.name, match.task);
+      const key = `${dateStr}-${match.name}`;
+      if (key === lastTriggeredKey) return;
+      lastTriggeredKey = key;
+
+      runScheduledTask(match.name, match.task);
+    })().catch(err => appendDaemonLog(`Scheduler tick failed: ${err.message}`));
   }, 60000);
 }
 
