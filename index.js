@@ -328,6 +328,11 @@ const LEAN_RANK = {
 const TIER_WEIGHTS = { 1: 3, 2: 2, 3: 1 };
 const SCORE_NORMALIZATION = TIER_WEIGHTS[1]; // one Tier-1 signal ≈ 1.0 normalized point
 
+// Precipitation probability (NWS forecast, %) above which a rain/storm
+// mention triggers an AVOID skip. Below this, it's treated as routine
+// summer shower chance, not a real postponement risk.
+const SEVERE_RAIN_PROB_THRESHOLD = 70;
+
 function computeConfidence(weightedSignals) {
   const count = (tier, direction) => weightedSignals.filter(w => w.tier === tier && w.direction === direction).length;
   const tier1Max = Math.max(count(1, 'OVER'), count(1, 'UNDER'));
@@ -521,12 +526,14 @@ async function getWeather(lat, lon) {
 
     const temps = window.map(p => p.temperature);
     const winds = window.map(p => parseInt(p.windSpeed));
+    const precipProbs = window.map(p => p.probabilityOfPrecipitation?.value ?? 0);
 
     return {
       avgTemp: Math.round(temps.reduce((a, b) => a + b) / temps.length),
       maxWind: Math.max(...winds),
       windDir: window[0].windDirection,
       condition: window[0].shortForecast,
+      maxPrecipProb: Math.max(...precipProbs),
     };
   } catch {
     return null;
@@ -653,7 +660,7 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   if (isDome) {
     signals.push('Weather irrelevant — dome');
   } else {
-    const { avgTemp, maxWind, windDir, condition } = weather;
+    const { avgTemp, maxWind, windDir, condition, maxPrecipProb } = weather;
 
     const isOut = stadium.outDirs.includes(windDir);
     const isCross = CROSSWIND_DIRS[venue]?.includes(windDir);
@@ -705,10 +712,19 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
       signals.push(`Neutral temp (${avgTemp}F)`);
     }
 
+    // A "chance" or "isolated/scattered" pop-up storm mention is routine
+    // summer MLB weather, not a reason to skip — most games carry some
+    // rain chance in their forecast. Only auto-skip when precipitation
+    // probability is genuinely high (SEVERE_RAIN_PROB_THRESHOLD+), which is
+    // where NWS language shifts to "likely"/"widespread" and postponement
+    // becomes a real possibility.
     const rainKeywords = ['rain', 'shower', 'storm', 'thunderstorm', 'drizzle'];
-    if (rainKeywords.some(k => condition.toLowerCase().includes(k))) {
-      signals.push(`${condition} — postponement risk, avoid or wait`);
+    const hasRainKeyword = rainKeywords.some(k => condition.toLowerCase().includes(k));
+    if (hasRainKeyword && maxPrecipProb >= SEVERE_RAIN_PROB_THRESHOLD) {
+      signals.push(`${condition} (${maxPrecipProb}% precip) — high postponement risk, avoid or wait`);
       return { lean: 'AVOID', signals, score: 0, confidence: 'N/A' };
+    } else if (hasRainKeyword) {
+      signals.push(`${condition} (${maxPrecipProb}% precip) — rain chance noted, not severe enough to skip`);
     }
   }
 
