@@ -3,6 +3,48 @@ const fs = require('fs');
 const path = require('path');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
+const BOT_STATUS_PATH = path.join(__dirname, 'bot_status.json');
+
+// Reads the self-check snapshot index.js writes at the end of every
+// getTodayGames() run, so the email can confirm the bot actually ran today
+// and flag anything that looked off (no odds, no Kalshi matches, auth
+// failure) instead of that only ever showing up as a quiet lack of picks.
+function getBotHealthStatus() {
+  const today = getTodayString();
+
+  if (!fs.existsSync(BOT_STATUS_PATH)) {
+    return {
+      available: false,
+      warnings: ['No bot_status.json found — the bot may not have completed a run since this check was added.'],
+    };
+  }
+
+  let status;
+  try {
+    status = JSON.parse(fs.readFileSync(BOT_STATUS_PATH, 'utf8'));
+  } catch {
+    return {
+      available: false,
+      warnings: ['bot_status.json could not be read/parsed — treat bot health as unknown.'],
+    };
+  }
+
+  const warnings = [];
+  if (status.date !== today) {
+    warnings.push(`Last recorded run was ${status.date}, not today (${today}) — the bot may not have run today.`);
+  }
+  if (status.kalshiAuthOk === false) {
+    warnings.push('Kalshi authentication FAILED — check the KALSHI_PRIVATE_KEY env var.');
+  }
+  if (status.gamesTotal > 0 && status.gamesWithOdds === 0) {
+    warnings.push(`Odds API returned no data for any of today's ${status.gamesTotal} games.`);
+  }
+  if (status.gamesTotal > 0 && status.gamesWithKalshi === 0) {
+    warnings.push(`Kalshi returned no matching markets for any of today's ${status.gamesTotal} games.`);
+  }
+
+  return { available: true, ...status, warnings };
+}
 
 const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
 const REGRESSION_MILESTONE_TARGET = 200;
@@ -162,6 +204,31 @@ function buildEmailHTML() {
   const hitMissColor = (hm) => hm === 'HIT' ? '#2e7d32' : (hm === 'MISS' ? '#c62828' : '#757575');
   const sideColor = (side) => side === 'OVER' ? '#2e7d32' : '#c62828';
 
+  const health = getBotHealthStatus();
+  const hasWarnings = health.warnings && health.warnings.length > 0;
+  const statusColor = hasWarnings ? '#c62828' : '#2e7d32';
+  const statusLabel = hasWarnings ? 'WARNING' : 'OK';
+
+  let statusHtml = `
+        <tr>
+          <td style="padding: 16px; background-color:#f7f7f7; border:1px solid #dddddd; border-left: 4px solid ${statusColor};">
+            <span style="${FONT} font-size:13px; font-weight:bold; color:${statusColor};">BOT STATUS: ${statusLabel}</span><br>`;
+  if (health.available) {
+    const lastRun = new Date(health.timestamp).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    statusHtml += `
+            <span style="${FONT} font-size:12.5px; ${TEXT}">Last run: ${lastRun} &nbsp;|&nbsp; Games: ${health.gamesTotal} &nbsp;|&nbsp; Odds coverage: ${health.gamesWithOdds}/${health.gamesTotal} &nbsp;|&nbsp; Kalshi coverage: ${health.gamesWithKalshi}/${health.gamesTotal} &nbsp;|&nbsp; Kalshi auth: ${health.kalshiAuthOk ? 'OK' : 'FAILED'}</span>`;
+  }
+  if (hasWarnings) {
+    health.warnings.forEach(w => {
+      statusHtml += `<br><span style="${FONT} font-size:12.5px; color:${statusColor};">- ${w}</span>`;
+    });
+  } else {
+    statusHtml += `<br><span style="${FONT} font-size:12.5px; ${MUTED}">No issues detected.</span>`;
+  }
+  statusHtml += `
+          </td>
+        </tr>`;
+
   const sectionHeader = (title) => `
         <tr>
           <td style="padding: 20px 0 10px 0; border-bottom: 2px solid #16324f;">
@@ -245,6 +312,7 @@ function buildEmailHTML() {
             <span style="${FONT} font-size:13px; color:#6b5900;">${regressionMilestoneLine(resolvedCount)}</span>
           </td>
         </tr>
+${statusHtml}
 ${sectionHeader(`YESTERDAY'S RESULTS (${yesterday})`)}`;
 
   if (yesterdayStats) {
@@ -341,6 +409,20 @@ function buildEmailText() {
   lines.push(PAPER_TRADING_NOTICE);
   lines.push(regressionMilestoneLine(resolvedCount), '');
 
+  const health = getBotHealthStatus();
+  const hasWarnings = health.warnings && health.warnings.length > 0;
+  lines.push(rule, `BOT STATUS: ${hasWarnings ? 'WARNING' : 'OK'}`, rule);
+  if (health.available) {
+    const lastRun = new Date(health.timestamp).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    lines.push(`Last run: ${lastRun} | Games: ${health.gamesTotal} | Odds coverage: ${health.gamesWithOdds}/${health.gamesTotal} | Kalshi coverage: ${health.gamesWithKalshi}/${health.gamesTotal} | Kalshi auth: ${health.kalshiAuthOk ? 'OK' : 'FAILED'}`);
+  }
+  if (hasWarnings) {
+    health.warnings.forEach(w => lines.push(`- ${w}`));
+  } else {
+    lines.push('No issues detected.');
+  }
+  lines.push('');
+
   lines.push(rule, `YESTERDAY'S RESULTS (${yesterday})`, rule);
   if (yesterdayStats) {
     lines.push(`Picks Resolved: ${yesterdayStats.hits}/${yesterdayStats.total}`);
@@ -407,15 +489,12 @@ async function sendEmailReport(opts = {}) {
   }
 
   const todayPicks = getTodaysPicks();
-  if (todayPicks.length === 0 && !forceTest) {
-    console.log('No picks today — skipping email');
-    return;
-  }
-
   if (forceTest) {
-    console.log('[TEST MODE] Sending test email regardless of picks...');
+    console.log('[TEST MODE] Sending test email...');
   }
 
+  // Always send — even with zero picks today, the email is the way to
+  // confirm the bot ran and to see yesterday's summary and health status.
   console.log(`Preparing email with ${todayPicks.length} picks for ${to}...`);
 
   const transporter = nodemailer.createTransport({

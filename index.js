@@ -8,6 +8,20 @@ const { sendEmailReport, testEmailReport } = require('./email');
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact'];
 
+// Self-check snapshot written at the end of every getTodayGames() run so
+// the email can report whether the bot actually ran today and whether its
+// data sources (Odds API, Kalshi) looked healthy — not committed to git,
+// it's transient run-to-run state read fresh by email.js each send.
+const BOT_STATUS_PATH = path.join(__dirname, 'bot_status.json');
+
+function writeBotStatus(status) {
+  try {
+    fs.writeFileSync(BOT_STATUS_PATH, JSON.stringify(status, null, 2));
+  } catch (err) {
+    console.error(`Failed to write bot_status.json: ${err.message}`);
+  }
+}
+
 const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
 const REGRESSION_MILESTONE_TARGET = 200;
 
@@ -1226,6 +1240,8 @@ async function getTodayGames(opts = {}) {
 
   const results = [];
   let explainCount = 0;
+  let gamesWithOdds = 0;
+  let gamesWithKalshi = 0;
 
   for (const game of games) {
     const home = game.teams.home.team.name;
@@ -1257,6 +1273,8 @@ async function getTodayGames(opts = {}) {
     const oddsKey = `${away}|${home}`;
     const odds = oddsMap[oddsKey];
     const kalshi = kalshiPrices.get(oddsKey);
+    if (odds) gamesWithOdds++;
+    if (kalshi) gamesWithKalshi++;
     appendDaemonLog(`[KALSHI-DEBUG] ${away} @ ${home} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
     const stadiumNotes = STADIUM_NOTES[venue];
     const isOverLean = OVER_LEANS.includes(analysis.lean);
@@ -1342,6 +1360,15 @@ async function getTodayGames(opts = {}) {
 
     results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, kalshi, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, sportsbookLine, kalshiLine, leaderboardSentence });
   }
+
+  writeBotStatus({
+    date: today,
+    timestamp: new Date().toISOString(),
+    gamesTotal: games.length,
+    gamesWithOdds,
+    gamesWithKalshi,
+    kalshiAuthOk: verifyKalshiAuth(),
+  });
 
   if (explain) {
     if (explainCount === 0) console.log('No TARGET or PRIME TARGET calls today.\n');
