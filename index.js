@@ -928,6 +928,14 @@ function kalshiDollarsToDecimal(dollarStr) {
   return p > 0 ? 1 / p : null;
 }
 
+// Converts decimal odds (e.g. 2.13x) to an American odds string (e.g. "+113"),
+// matching the format Side_Juice already uses when it comes from the Odds API.
+function decimalToAmericanOdds(decimal) {
+  if (decimal == null) return null;
+  const american = decimal >= 2 ? (decimal - 1) * 100 : -100 / (decimal - 1);
+  return american >= 0 ? `+${Math.round(american)}` : `${Math.round(american)}`;
+}
+
 const KALSHI_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 // Converts a 'YYYY-MM-DD' (UTC) date string into Kalshi's ticker date token,
 // e.g. '2026-06-24' -> '26JUN24'. Kalshi's event_ticker embeds this token
@@ -1017,7 +1025,7 @@ async function getKalshiMLBPrices(games, today) {
     const overPrice = kalshiDollarsToDecimal(best.yes_bid_dollars);
     const underPrice = kalshiDollarsToDecimal(best.no_bid_dollars);
     if (overPrice != null && underPrice != null) {
-      priceMap.set(`${away}|${home}`, { overPrice, underPrice });
+      priceMap.set(`${away}|${home}`, { overPrice, underPrice, strike: best.floor_strike });
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
     } else {
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=BAD_PRICE_DATA strike=${best.floor_strike} yes=${best.yes_bid_dollars} no=${best.no_bid_dollars}`);
@@ -1254,8 +1262,20 @@ async function getTodayGames(opts = {}) {
     const isOverLean = OVER_LEANS.includes(analysis.lean);
     const edge = detectEdge(analysis.lean, kalshi, venue);
 
+    // The Odds API is only used to source Total_Line/Side_Juice for logging —
+    // edge detection itself is entirely Kalshi-based. When the Odds API has
+    // no line for a game (outage or just missing coverage), fall back to
+    // Kalshi's own matched strike/price so a real TARGET/PRIME TARGET call
+    // still gets logged instead of being silently dropped.
+    const kalshiDerivedOdds = (!odds && kalshi && kalshi.strike != null) ? {
+      total: kalshi.strike.toFixed(1),
+      overJuice: decimalToAmericanOdds(kalshi.overPrice),
+      underJuice: decimalToAmericanOdds(kalshi.underPrice),
+    } : null;
+    const loggableOdds = odds || kalshiDerivedOdds;
+
     const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
-    if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && odds && isHighConfEdge) {
+    if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && loggableOdds && isHighConfEdge) {
       const isDome = !coords?.outDirs;
       const signalFact = pitcherFact(awayStats, homeStats, awayPitcher, homePitcher, isOverLean)
         || parkFactorFact(stadiumNotes, venue, isOverLean)
@@ -1264,7 +1284,7 @@ async function getTodayGames(opts = {}) {
         || 'No single dominant signal — the call comes from several smaller factors combined.';
       const marketFact = marketSentence(kalshi, isOverLean);
       const riskFact = riskFactorFact(analysis.weighted, isOverLean, stadiumNotes, isDome, analysis.confidence);
-      logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, odds, { signalFact, marketFact, riskFact });
+      logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, loggableOdds, { signalFact, marketFact, riskFact });
     }
 
     if (explain) {
