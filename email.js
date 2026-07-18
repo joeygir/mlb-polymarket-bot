@@ -474,6 +474,36 @@ function buildEmailText() {
   return lines.join('\n');
 }
 
+// Cloud hosts (Railway included) sometimes have flaky or partially-blocked
+// outbound SMTP — one port works, another times out, or a connection just
+// blips. Alternates between Gmail's two submission ports (465 implicit TLS,
+// 587 STARTTLS) across retries instead of failing after a single attempt on
+// one config.
+function buildGmailTransportConfigs(user, pass) {
+  const timeouts = { connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 15000 };
+  return [
+    { label: 'port 465 (implicit TLS)', config: { host: 'smtp.gmail.com', port: 465, secure: true, auth: { user, pass }, ...timeouts } },
+    { label: 'port 587 (STARTTLS)', config: { host: 'smtp.gmail.com', port: 587, secure: false, auth: { user, pass }, ...timeouts } },
+  ];
+}
+
+async function sendMailWithRetry(transportOptions, mailOptions, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { label, config } = transportOptions[(attempt - 1) % transportOptions.length];
+    try {
+      console.log(`  Attempt ${attempt}/${maxAttempts} via ${label}...`);
+      const transporter = nodemailer.createTransport(config);
+      return await transporter.sendMail(mailOptions);
+    } catch (err) {
+      lastErr = err;
+      console.error(`  Attempt ${attempt}/${maxAttempts} (${label}) failed: ${err.message}`);
+      if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 4000 * attempt));
+    }
+  }
+  throw lastErr;
+}
+
 async function sendEmailReport(opts = {}) {
   const forceTest = opts.forceTest || false;
   const user = process.env.EMAIL_USER;
@@ -497,30 +527,17 @@ async function sendEmailReport(opts = {}) {
   // confirm the bot ran and to see yesterday's summary and health status.
   console.log(`Preparing email with ${todayPicks.length} picks for ${to}...`);
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user,
-      pass,
-    },
-  });
-
+  const transportOptions = buildGmailTransportConfigs(user, pass);
   const { subject, html } = buildEmailHTML();
   const text = buildEmailText();
 
   try {
     console.log(`Connecting to Gmail SMTP...`);
-    const info = await transporter.sendMail({
-      from: user,
-      to,
-      subject,
-      text,
-      html,
-    });
+    const info = await sendMailWithRetry(transportOptions, { from: user, to, subject, text, html });
     console.log(`✓ Email sent successfully to ${to}`);
     console.log(`  Message ID: ${info.messageId}`);
   } catch (err) {
-    console.error(`✗ Failed to send email: ${err.message}`);
+    console.error(`✗ Failed to send email after all retries: ${err.message}`);
     if (err.response) console.error(`  Response: ${err.response}`);
   }
 }
