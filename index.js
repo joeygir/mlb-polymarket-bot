@@ -1610,7 +1610,16 @@ function runDaemon() {
   appendDaemonLog(`Daemon started (${dayName}) — schedule: ${scheduleTimes} UTC`);
   console.log(`Daemon started (${dayName}). Checking schedule every 60s — ${scheduleTimes} UTC.`);
 
-  let lastTriggeredKey = null;
+  // Tracks which task-keys ("date-taskname") have already fired, reset
+  // whenever the UTC date rolls over. Using "has this passed and not yet
+  // fired today" instead of an exact hour===X && minute===Y match means a
+  // container that starts late (crash-restart, redeploy, cold start) still
+  // catches up on any task whose time already passed today instead of
+  // silently skipping it until tomorrow — an exact-minute match only ever
+  // gets one chance per day and permanently misses it if the process isn't
+  // alive at that precise minute.
+  let triggeredKeys = new Set();
+  let lastCheckedDate = null;
   let lastLoggedAdjustmentDate = null;
 
   setInterval(() => {
@@ -1620,6 +1629,12 @@ function runDaemon() {
       const minute = now.getUTCMinutes();
       const dayOfWeek = now.getUTCDay();
       const dateStr = now.toISOString().split('T')[0];
+
+      if (dateStr !== lastCheckedDate) {
+        triggeredKeys = new Set();
+        lastCheckedDate = dateStr;
+      }
+
       const baseSchedule = getScheduleForDay(dayOfWeek);
       const schedule = await applyGetawayDayAdjustment(baseSchedule, dateStr);
 
@@ -1632,14 +1647,19 @@ function runDaemon() {
         lastLoggedAdjustmentDate = dateStr;
       }
 
-      const match = schedule.find(s => s.hour === hour && s.minute === minute);
-      if (!match) return;
+      const nowMinutes = hour * 60 + minute;
+      for (const s of schedule) {
+        const key = `${dateStr}-${s.name}`;
+        if (triggeredKeys.has(key)) continue;
+        const scheduledMinutes = s.hour * 60 + s.minute;
+        if (nowMinutes < scheduledMinutes) continue;
 
-      const key = `${dateStr}-${match.name}`;
-      if (key === lastTriggeredKey) return;
-      lastTriggeredKey = key;
-
-      runScheduledTask(match.name, match.task);
+        triggeredKeys.add(key);
+        if (nowMinutes > scheduledMinutes) {
+          appendDaemonLog(`Catch-up trigger: ${s.name} scheduled for ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')} UTC, running now at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} (process wasn't running at the scheduled time)`);
+        }
+        runScheduledTask(s.name, s.task);
+      }
     })().catch(err => appendDaemonLog(`Scheduler tick failed: ${err.message}`));
   }, 60000);
 }
