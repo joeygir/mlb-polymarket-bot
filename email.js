@@ -184,6 +184,13 @@ function getOverallStats() {
     else break;
   }
 
+  // Closing line value: avg movement of the market toward/away from our
+  // entries. Sustained positive CLV is the earliest reliable evidence the
+  // model beats the market.
+  const clvRows = rows.filter(r => r.CLV !== '' && r.CLV != null && !isNaN(parseFloat(r.CLV)));
+  const avgClv = clvRows.length ? clvRows.reduce((s, r) => s + parseFloat(r.CLV), 0) / clvRows.length : null;
+  const clvBeat = clvRows.filter(r => parseFloat(r.CLV) > 0).length;
+
   return {
     totalPicks: rows.length,
     resolvedPicks: resolved.length,
@@ -192,6 +199,7 @@ function getOverallStats() {
     totalPnL: totalPnL.toFixed(2),
     leanStats,
     streak: streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? (streakType === 'MISS' ? 'ES' : 'S') : ''}` : 'None',
+    clv: avgClv != null ? { avg: avgClv.toFixed(1), count: clvRows.length, beat: clvBeat } : null,
   };
 }
 
@@ -290,8 +298,8 @@ function buildEmailHTML() {
                 <td style="border-left: 4px solid ${sideColor(pick.Side)}; background-color:#f7f7f7; padding: 10px 12px;">
                   <span style="${FONT} font-size:14px; ${TEXT} font-weight:bold;">${pick.Game}</span>
                   <span style="${FONT} font-size:12.5px; ${MUTED}"> [${pick.Edge_Label}]</span><br>
-                  <span style="${FONT} font-size:13px; ${TEXT}">${displayLean(pick.Lean)} | Line: ${pick.Total_Line}</span><br>
-                  <span style="${FONT} font-size:13px; ${TEXT}">Kalshi: <strong>${pick.Side_Juice}</strong> juice</span>
+                  <span style="${FONT} font-size:13px; ${TEXT}">${pick.Side} ${pick.Total_Line} | ${displayLean(pick.Lean)}</span><br>
+                  <span style="${FONT} font-size:13px; ${TEXT}">Kalshi: <strong>${pick.Side_Juice}</strong> juice${pick.Model_Prob ? ` | Model: <strong>${(parseFloat(pick.Model_Prob) * 100).toFixed(1)}%</strong> vs entry cost ${(parseFloat(pick.Entry_Cost) * 100).toFixed(0)}%` : ''}</span>
                   ${reasoningHtml}
                 </td>
               </tr>
@@ -357,6 +365,7 @@ ${sectionHeader(`YESTERDAY'S RESULTS (${yesterday})`)}`;
               <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Overall Hit Rate:</td><td style="${FONT} font-size:13px; ${TEXT} font-weight:bold; padding:3px 0;" align="right">${overallStats.hits}/${overallStats.resolvedPicks} (${overallStats.hitRate}%)</td></tr>
               <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Total P&amp;L:</td><td style="${FONT} font-size:13px; font-weight:bold; padding:3px 0; color:${pnlColor(overallStats.totalPnL)};" align="right">${overallStats.totalPnL >= 0 ? '+' : ''}${overallStats.totalPnL}</td></tr>
               <tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Current Streak:</td><td style="${FONT} font-size:13px; ${TEXT} font-weight:bold; padding:3px 0;" align="right">${overallStats.streak}</td></tr>
+              ${overallStats.clv ? `<tr><td style="${FONT} font-size:13px; ${TEXT} padding:3px 0;">Closing Line Value:</td><td style="${FONT} font-size:13px; font-weight:bold; padding:3px 0; color:${overallStats.clv.avg >= 0 ? '#2e7d32' : '#c62828'};" align="right">avg ${overallStats.clv.avg >= 0 ? '+' : ''}${overallStats.clv.avg} pts (${overallStats.clv.beat}/${overallStats.clv.count} beat close)</td></tr>` : ''}
             </table>
           </td>
         </tr>
@@ -455,8 +464,8 @@ function buildEmailText() {
   } else {
     todayPicks.forEach(pick => {
       lines.push(`- ${pick.Game} [${pick.Edge_Label}]`);
-      lines.push(`  ${displayLean(pick.Lean)} | Line: ${pick.Total_Line}`);
-      lines.push(`  Kalshi: ${pick.Side_Juice} juice`);
+      lines.push(`  ${pick.Side} ${pick.Total_Line} | ${displayLean(pick.Lean)}`);
+      lines.push(`  Kalshi: ${pick.Side_Juice} juice${pick.Model_Prob ? ` | Model: ${(parseFloat(pick.Model_Prob) * 100).toFixed(1)}% vs entry cost ${(parseFloat(pick.Entry_Cost) * 100).toFixed(0)}%` : ''}`);
       if (pick.Signal_Fact || pick.Market_Fact || pick.Risk_Fact) {
         lines.push(`  ${pick.Signal_Fact || 'Signal detail not available for this pick.'}`);
         lines.push(`  ${pick.Market_Fact || 'Market comparison not available for this pick.'}`);
@@ -473,7 +482,11 @@ function buildEmailText() {
     lines.push(`Total Picks Made: ${overallStats.totalPicks}`);
     lines.push(`Overall Hit Rate: ${overallStats.hits}/${overallStats.resolvedPicks} (${overallStats.hitRate}%)`);
     lines.push(`Total P&L: ${overallStats.totalPnL >= 0 ? '+' : ''}${overallStats.totalPnL}`);
-    lines.push(`Current Streak: ${overallStats.streak}`, '');
+    lines.push(`Current Streak: ${overallStats.streak}`);
+    if (overallStats.clv) {
+      lines.push(`Closing Line Value: avg ${overallStats.clv.avg >= 0 ? '+' : ''}${overallStats.clv.avg} pts (${overallStats.clv.beat}/${overallStats.clv.count} beat close)`);
+    }
+    lines.push('');
     lines.push('Hit Rate by Lean:');
     for (const [lean, stats] of Object.entries(overallStats.leanStats)) {
       lines.push(`  ${displayLean(lean).padEnd(16)}: ${stats.hits}/${stats.total} (${stats.hitRate}%) | P&L: ${stats.pnl >= 0 ? '+' : ''}${stats.pnl}`);

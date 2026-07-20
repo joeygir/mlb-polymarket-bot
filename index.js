@@ -15,7 +15,13 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 if (DATA_DIR !== __dirname && !fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const PICKS_LOG = path.join(DATA_DIR, 'picks_log.csv');
-const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact','Signals'];
+// Model_Total/Model_Prob/Entry_Cost: the probability model's projection and
+// what we "paid" (ask + context) at pick time. Kalshi_Ticker enables the CLV
+// pass in updateResults: Close_Cost is the market's last traded price for our
+// side at close, and CLV = Close_Cost - Entry_Cost in probability points —
+// positive means the market moved toward our position, the fastest-converging
+// evidence of whether picks beat the market.
+const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact','Signals','Model_Total','Model_Prob','Entry_Cost','Kalshi_Ticker','Close_Cost','CLV'];
 
 // Compact machine-readable encoding of the weighted signals that fired for a
 // pick, e.g. "pitcher_solid:UNDER:1|park_pitcher:UNDER:1" — this is what
@@ -110,15 +116,21 @@ function rowToCSV(row, headers) {
 
 const OVER_LEANS = ['STRONG OVER','OVER','LEAN OVER','DOME — LEAN OVER'];
 
-function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}) {
-  const isOver = OVER_LEANS.includes(lean);
-  const side = isOver ? 'OVER' : 'UNDER';
-  const sideJuice = isOver ? odds.overJuice : odds.underJuice;
+function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}, model = {}) {
+  // Side comes from the probability edge when present (it picks its own side
+  // and strike); the lean-derived side remains as fallback for any legacy path.
+  const side = model.side || (OVER_LEANS.includes(lean) ? 'OVER' : 'UNDER');
+  const sideJuice = side === 'OVER' ? odds.overJuice : odds.underJuice;
   const newRow = {
     Date: date, Game: game, Lean: lean, Confidence: confidence, Edge_Label: edgeLabel,
     Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '',
     Signal_Fact: reasoning.signalFact || '', Market_Fact: reasoning.marketFact || '', Risk_Fact: reasoning.riskFact || '',
     Signals: reasoning.signals || '',
+    Model_Total: model.modelTotal != null ? model.modelTotal.toFixed(2) : '',
+    Model_Prob: model.modelProb != null ? model.modelProb.toFixed(3) : '',
+    Entry_Cost: model.entryCost != null ? model.entryCost.toFixed(2) : '',
+    Kalshi_Ticker: model.ticker || '',
+    Close_Cost: '', CLV: '',
   };
 
   if (!fs.existsSync(PICKS_LOG)) {
@@ -143,6 +155,12 @@ function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}) 
       Market_Fact: headers.includes('Market_Fact') ? r.Market_Fact : '',
       Risk_Fact: headers.includes('Risk_Fact') ? r.Risk_Fact : '',
       Signals: headers.includes('Signals') ? r.Signals : '',
+      Model_Total: headers.includes('Model_Total') ? r.Model_Total : '',
+      Model_Prob: headers.includes('Model_Prob') ? r.Model_Prob : '',
+      Entry_Cost: headers.includes('Entry_Cost') ? r.Entry_Cost : '',
+      Kalshi_Ticker: headers.includes('Kalshi_Ticker') ? r.Kalshi_Ticker : '',
+      Close_Cost: headers.includes('Close_Cost') ? r.Close_Cost : '',
+      CLV: headers.includes('CLV') ? r.CLV : '',
     }));
     migrated.push(newRow);
     fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + migrated.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
@@ -219,12 +237,37 @@ async function fetchFinalScores(date) {
   }
 }
 
+// Closing-line-value pass: for any pick with a Kalshi ticker and no recorded
+// close, fetch the settled market's last traded price and log where the
+// market closed relative to our entry. Positive CLV = the market moved toward
+// our side after we picked — the fastest-converging evidence of whether picks
+// beat the market (it stabilizes in ~50-100 picks, versus 500+ for raw W/L).
+async function captureCLV(rows) {
+  let captured = 0;
+  const needsClv = rows.filter(r => r.Kalshi_Ticker && r.Entry_Cost && !r.Close_Cost && r.Result);
+  for (const row of needsClv) {
+    try {
+      const data = await kalshiGet(`${KALSHI_PATH_PREFIX}/markets/${row.Kalshi_Ticker}`);
+      const lastYes = parseFloat(data?.market?.last_price_dollars);
+      if (isNaN(lastYes)) continue;
+      const closeForOurSide = row.Side === 'OVER' ? lastYes : 1 - lastYes;
+      const clv = closeForOurSide - parseFloat(row.Entry_Cost);
+      row.Close_Cost = closeForOurSide.toFixed(2);
+      row.CLV = (clv * 100).toFixed(1);
+      captured++;
+      console.log(`  CLV: ${row.Game} (${row.Date}) — entered ${row.Side} at ${row.Entry_Cost}, closed ${row.Close_Cost} → ${clv >= 0 ? '+' : ''}${(clv * 100).toFixed(1)} pts`);
+    } catch (err) {
+      console.log(`  CLV fetch failed for ${row.Kalshi_Ticker}: ${err.message}`);
+    }
+  }
+  return captured;
+}
+
 async function updateResults() {
   if (!fs.existsSync(PICKS_LOG)) { console.log('picks_log.csv not found.'); return; }
 
   const { rows } = parseCSV(fs.readFileSync(PICKS_LOG, 'utf8'));
   const pending = rows.filter(r => !r.Result);
-  if (pending.length === 0) { console.log('No pending results to update.'); return; }
 
   const byDate = {};
   for (const r of pending) { (byDate[r.Date] = byDate[r.Date] || []).push(r); }
@@ -248,9 +291,13 @@ async function updateResults() {
     }
   }
 
-  if (updated > 0) {
+  const clvCaptured = await captureCLV(rows);
+
+  if (updated > 0 || clvCaptured > 0) {
     fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + rows.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
-    console.log(`\nUpdated ${updated} row(s) in picks_log.csv`);
+    console.log(`\nUpdated ${updated} result(s), captured ${clvCaptured} CLV close(s) in picks_log.csv`);
+  } else if (pending.length === 0) {
+    console.log('No pending results to update.');
   }
 }
 
@@ -272,6 +319,16 @@ function printSummary() {
   console.log(`Resolved picks     : ${total}`);
   console.log(`Overall hit rate   : ${hits}/${total} (${total > 0 ? (hits/total*100).toFixed(1) : '0.0'}%)`);
   console.log(`Total P&L          : ${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}`);
+
+  // Average closing line value across picks that have a recorded close —
+  // sustained positive CLV is the strongest early evidence the model beats
+  // the market, well before the W/L record is statistically meaningful.
+  const clvRows = rows.filter(r => r.CLV !== '' && r.CLV != null && !isNaN(parseFloat(r.CLV)));
+  if (clvRows.length > 0) {
+    const avgClv = clvRows.reduce((s, r) => s + parseFloat(r.CLV), 0) / clvRows.length;
+    const positive = clvRows.filter(r => parseFloat(r.CLV) > 0).length;
+    console.log(`Closing line value : avg ${avgClv >= 0 ? '+' : ''}${avgClv.toFixed(1)} pts across ${clvRows.length} picks (${positive}/${clvRows.length} beat the close)`);
+  }
 
   console.log('\nBy Edge Label:');
   for (const label of ['PRIME TARGET', 'TARGET']) {
@@ -357,7 +414,9 @@ const STADIUM_NOTES = {
   'UNIQLO Field at Dodger Stadium': { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
   'Dodger Stadium':                 { windReliability: 'LOW',    weatherWeight: 0.3, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.96, notes: 'Bowl shape and surrounding hills make surface wind unreliable versus forecast.' },
   'Oracle Park':                    { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.94, notes: 'Bay-driven wind off McCovey Cove can shift quickly within a game.' },
-  'Coors Field':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 2, roofRetractable: false, parkFactor: 1.30, notes: 'Altitude (5,200ft) is the dominant scoring factor — wind is secondary.' },
+  // Humidor-era run factor — the pre-humidor ~1.30 figure overstates modern
+  // Coors and pushed the projection ~1 run too high on its own.
+  'Coors Field':                    { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 2, roofRetractable: false, parkFactor: 1.20, notes: 'Altitude (5,200ft) is the dominant scoring factor — wind is secondary.' },
   'T-Mobile Park':                  { windReliability: 'MEDIUM', weatherWeight: 0.6, altitudeBoost: 0, roofRetractable: true,  parkFactor: 0.95, notes: 'Retractable roof affects in-stadium wind even when open — verify roof status before betting.' },
   'Comerica Park':                  { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 0.97, notes: 'Open outfield design — wind tracks forecast closely.' },
   'PNC Park':                       { windReliability: 'HIGH',   weatherWeight: 1.0, altitudeBoost: 0, roofRetractable: false, parkFactor: 1.04, notes: 'River-side open design — wind tracks forecast closely.' },
@@ -423,6 +482,202 @@ const SCORE_NORMALIZATION = TIER_WEIGHTS[1]; // one Tier-1 signal ≈ 1.0 normal
 // mention triggers an AVOID skip. Below this, it's treated as routine
 // summer shower chance, not a real postponement risk.
 const SEVERE_RAIN_PROB_THRESHOLD = 70;
+
+// --- Probability model ------------------------------------------------------
+// Projects a game's expected total runs from the same inputs the signal
+// scorecard already fetches, converts it to P(over) for each Kalshi strike,
+// and calls an edge only when our probability beats the ask price plus
+// Kalshi's trading fee by a real margin. This replaces "the market disagrees
+// with my lean" — which treats market disagreement as free money — with
+// "my estimated probability exceeds what the market is charging."
+//
+// League-baseline constants. These are deliberately explicit (not buried in
+// formulas) so the 200-pick recalibration can revisit them against logged
+// outcomes.
+const LEAGUE_AVG_STARTER_ERA = 4.20;
+const LEAGUE_AVG_BULLPEN_ERA = 4.10;
+const LEAGUE_AVG_OPS = 0.720;
+const RUNS_PER_EARNED_RUN = 1.08;    // unearned runs add ~8% on top of ERA
+const STARTER_INNINGS = 5.5;         // league-typical starter workload
+const BULLPEN_INNINGS = 3.5;
+const OPS_RUN_ELASTICITY = 2.0;      // +10% OPS vs league ≈ +20% runs scored
+const TOTAL_RUNS_SD_COEFF = 1.45;    // SD of game totals ≈ 1.45 * sqrt(mean) (≈4.3 at 8.7)
+
+// Kalshi's taker fee: ceil'd 7% of price*(1-price) per contract. Charged on
+// entry, so the true cost of a position is ask + fee.
+const KALSHI_FEE_RATE = 0.07;
+function kalshiFee(price) { return KALSHI_FEE_RATE * price * (1 - price); }
+
+// Minimum probability edge (our P minus fee-adjusted cost) per label.
+const EDGE_PRIME_TARGET = 0.08;
+const EDGE_TARGET = 0.05;
+const EDGE_CONSIDER = 0.02;
+
+// Standard normal CDF (Abramowitz–Stegun erf approximation, |err| < 1.5e-7).
+function normalCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989422804014327 * Math.exp(-z * z / 2);
+  let p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return z >= 0 ? 1 - p : p;
+}
+
+// Expected runs a team's pitching staff allows per game, from the starter's
+// quality stat (xERA preferred) and IP-weighted bullpen ERA. Missing pieces
+// fall back to league average and are counted against data quality.
+function pitchingRunsAllowed(starterStats, bullpen, quality) {
+  let starterEra = LEAGUE_AVG_STARTER_ERA;
+  if (starterStats && (starterStats.xera != null || !isNaN(starterStats.era))) {
+    starterEra = starterStats.xera != null ? starterStats.xera : starterStats.era;
+  } else {
+    quality.missing.push('starter');
+  }
+  let bullpenEra = LEAGUE_AVG_BULLPEN_ERA;
+  if (bullpen && bullpen.era != null) bullpenEra = bullpen.era;
+  else quality.missing.push('bullpen');
+
+  return ((starterEra * STARTER_INNINGS) + (bullpenEra * BULLPEN_INNINGS)) / 9 * RUNS_PER_EARNED_RUN;
+}
+
+// Multiplier on runs scored from lineup quality vs league-average OPS.
+// Blends season (60%) and last-15 (40%) OPS when both exist. opsDivisor
+// park-neutralizes OPS that was accumulated half at an extreme home park.
+function lineupRunFactor(hitters, quality, opsDivisor = 1) {
+  if (!hitters || (hitters.seasonOps == null && hitters.recentOps == null)) {
+    quality.missing.push('lineup');
+    return 1;
+  }
+  const ops = (hitters.seasonOps != null && hitters.recentOps != null
+    ? 0.6 * hitters.seasonOps + 0.4 * hitters.recentOps
+    : (hitters.seasonOps ?? hitters.recentOps)) / opsDivisor;
+  return 1 + OPS_RUN_ELASTICITY * (ops - LEAGUE_AVG_OPS) / LEAGUE_AVG_OPS;
+}
+
+// Weather multiplier only (park handled separately in projectGameTotal):
+// temperature for outdoor games; wind only at HIGH-reliability wind parks
+// (same trust rule as the scorecard).
+function weatherFactor(stadiumNotes, weather, coords, venue, isDome) {
+  let factor = 1;
+  if (!isDome && weather) {
+    const tempAdj = Math.max(-0.06, Math.min(0.09, (weather.avgTemp - 70) * 0.003));
+    factor *= 1 + tempAdj;
+    if (stadiumNotes?.windReliability === 'HIGH' && weather.maxWind >= 10 && coords?.outDirs) {
+      const isOut = coords.outDirs.includes(weather.windDir);
+      const isCross = CROSSWIND_DIRS[venue]?.includes(weather.windDir);
+      if (isOut) factor *= weather.maxWind >= 15 ? 1.06 : 1.03;
+      else if (!isCross) factor *= weather.maxWind >= 15 ? 0.94 : 0.97;
+    }
+  }
+  return factor;
+}
+
+// Full game projection. Returns null when both starters are unknown — a
+// projection built entirely on league-average pitching has nothing to say.
+function projectGameTotal({ awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, stadiumNotes, weather, coords, venue, isDome }) {
+  const quality = { missing: [] };
+
+  if (!awayStats && !homeStats) return null;
+
+  // The HOME club's raw stats already embed roughly half of this park's
+  // effect (they play half their games here): a Rockies pitcher's 5.5 ERA is
+  // partly Coors, and a Rockies hitter's OPS is partly Coors. Applying the
+  // full park factor on top of those raw numbers double-counts the park —
+  // the first version of this model projected 17 runs at Coors that way.
+  // pfHalf removes the embedded half from home-side inputs (OPS scales with
+  // roughly the square root of the run factor), then the full park factor is
+  // applied once to the neutralized total. Away-club stats accumulate across
+  // a mix of parks and are treated as neutral.
+  const pf = stadiumNotes?.parkFactor ?? 1;
+  const pfHalf = (1 + pf) / 2;
+
+  const awayRunsAllowed = pitchingRunsAllowed(awayStats, awayBullpen, quality);
+  const homeRunsAllowed = pitchingRunsAllowed(homeStats, homeBullpen, quality) / pfHalf;
+  const awayOffense = lineupRunFactor(awayHitters, quality);
+  const homeOffense = lineupRunFactor(homeHitters, quality, Math.sqrt(pfHalf));
+  const wx = weatherFactor(stadiumNotes, weather, coords, venue, isDome);
+
+  // Away team scores against home pitching (scaled by away offense), and
+  // vice versa; park and weather scale both.
+  const projectedTotal = (homeRunsAllowed * awayOffense + awayRunsAllowed * homeOffense) * pf * wx;
+  const sd = TOTAL_RUNS_SD_COEFF * Math.sqrt(projectedTotal);
+
+  return { projectedTotal, sd, missing: quality.missing };
+}
+
+// P(total > strike) under the normal model. Strikes are X.5 so no push case.
+function probOver(projection, strike) {
+  return 1 - normalCdf((strike - projection.projectedTotal) / projection.sd);
+}
+
+// How far from the projected total a strike may sit and still be considered.
+// The normal model's tails are its least trustworthy region (real run
+// distributions are right-skewed), and Kalshi's far-tail books are thin with
+// wide spreads — un-constrained search reliably "finds" its biggest edges
+// exactly there (e.g. UNDER 2.5 at a 9% model probability), which are model
+// artifacts, not value. Same reason for the cost bounds: sub-10-cent and
+// 90-cent-plus contracts are longshot/lock territory where the model has no
+// standing to disagree with the market.
+const STRIKE_SEARCH_WINDOW = 2.0;
+const MIN_CONTRACT_COST = 0.10;
+const MAX_CONTRACT_COST = 0.90;
+
+// When the model's projected total sits further than this from the market's
+// own implied center, the humble read is that the model is missing something
+// the market knows (roof status, humidor, late scratches), not that a
+// 20-point edge appeared out of nowhere — cap those at CONSIDER instead of
+// logging them as bets.
+const MODEL_DISAGREEMENT_CAP = 2.5;
+
+// Evaluates Kalshi strikes near the projection on both sides and returns the
+// single best fee-adjusted edge, labeled by size. Searches beyond just the
+// strike nearest the book total — mispricing is at least as likely one
+// strike away from the consensus number — but stays inside the window where
+// the normal approximation and market liquidity are both credible.
+function detectProbEdge(projection, kalshiStrikes) {
+  if (!projection) return { label: 'NO MODEL', reason: 'Insufficient pitcher data to project this game.' };
+  if (!kalshiStrikes || !kalshiStrikes.length) return { label: 'No Kalshi market', reason: 'No Kalshi market found — skipping edge scoring.' };
+
+  let best = null;
+  for (const s of kalshiStrikes) {
+    if (Math.abs(s.strike - projection.projectedTotal) > STRIKE_SEARCH_WINDOW) continue;
+    const pOver = probOver(projection, s.strike);
+    const candidates = [
+      { side: 'OVER', prob: pOver, cost: s.overCost },
+      { side: 'UNDER', prob: 1 - pOver, cost: s.underCost },
+    ];
+    for (const c of candidates) {
+      if (c.cost == null || c.cost < MIN_CONTRACT_COST || c.cost > MAX_CONTRACT_COST) continue;
+      const effectiveCost = c.cost + kalshiFee(c.cost);
+      const edge = c.prob - effectiveCost;
+      if (!best || edge > best.edge) {
+        best = { side: c.side, strike: s.strike, ticker: s.ticker, cost: c.cost, effectiveCost, ourProb: c.prob, edge };
+      }
+    }
+  }
+
+  if (!best) return { label: 'No Kalshi market', reason: 'No usable Kalshi pricing.' };
+
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const detail = `model ${pct(best.ourProb)} vs cost ${pct(best.effectiveCost)} (incl. fee) on ${best.side} ${best.strike} — edge ${pct(best.edge)}`;
+
+  // Market's implied center: the strike priced closest to a coin flip. If the
+  // projection disagrees with that center by more than the cap, refuse to
+  // treat the gap as a bettable edge regardless of its size.
+  let marketCenter = null;
+  let centerDist = Infinity;
+  for (const s of kalshiStrikes) {
+    if (s.overCost == null) continue;
+    const d = Math.abs(s.overCost - 0.5);
+    if (d < centerDist) { centerDist = d; marketCenter = s.strike; }
+  }
+  if (marketCenter != null && Math.abs(projection.projectedTotal - marketCenter) > MODEL_DISAGREEMENT_CAP) {
+    return { ...best, label: 'CONSIDER', reason: `Model projects ${projection.projectedTotal.toFixed(1)} but the market centers near ${marketCenter} — disagreement too large to trust as an edge (${detail})` };
+  }
+
+  if (best.edge >= EDGE_PRIME_TARGET) return { ...best, label: 'PRIME TARGET', reason: `Large probability edge: ${detail}` };
+  if (best.edge >= EDGE_TARGET) return { ...best, label: 'TARGET', reason: `Probability edge: ${detail}` };
+  if (best.edge >= EDGE_CONSIDER) return { ...best, label: 'CONSIDER', reason: `Marginal probability edge: ${detail}` };
+  return { ...best, label: 'PASS', reason: `No probability edge after fees: ${detail}` };
+}
 
 function computeConfidence(weightedSignals) {
   const count = (tier, direction) => weightedSignals.filter(w => w.tier === tier && w.direction === direction).length;
@@ -902,72 +1157,6 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
 
   return { lean, signals, score, confidence, weighted };
 }
-// Edge detection runs entirely on Kalshi decimal prices — that's where bets
-// are actually placed. The Odds API no longer feeds this function at all; it
-// only supplies the total-line number used elsewhere to pick the closest
-// Kalshi strike. Price thresholds below are the decimal-odds equivalents of
-// the old American-juice thresholds (-130 ≈ 1.77x, -115 ≈ 1.87x, -108 ≈ 1.93x).
-function detectEdge(lean, kalshi, venue, bookTotal) {
-  if (lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
-    return null;
-  }
-
-  if (!kalshi) {
-    return { label: 'No Kalshi market', reason: 'No Kalshi market found — skipping edge scoring.' };
-  }
-
-  // The lean was formed around the sportsbook's total; if the closest Kalshi
-  // strike sits a full run or more away from that number, the two aren't
-  // talking about the same bet — an OVER lean at 8.5 says nothing about the
-  // over at 10.5 — so refuse to call the price gap an edge.
-  if (bookTotal != null && kalshi.strike != null && Math.abs(kalshi.strike - parseFloat(bookTotal)) >= 1) {
-    return { label: 'PASS', reason: `Kalshi strike ${kalshi.strike} is too far from the book total ${bookTotal} for an apples-to-apples edge call.` };
-  }
-
-  const isOverLean = ['STRONG OVER', 'OVER', 'LEAN OVER', 'DOME — LEAN OVER'].includes(lean);
-  const isUnderLean = ['STRONG UNDER', 'UNDER', 'LEAN UNDER', 'DOME — LEAN UNDER'].includes(lean);
-  const isStrong = ['STRONG OVER', 'STRONG UNDER'].includes(lean);
-  const isMedium = ['OVER', 'UNDER', 'LEAN OVER', 'LEAN UNDER'].includes(lean);
-
-  const { overPrice, underPrice } = kalshi;
-  const fmt = (p) => `${p.toFixed(2)}x`;
-
-  const kalshiFavorsOver = overPrice < underPrice;
-  const kalshiFavorsUnder = underPrice < overPrice;
-
-  const relevantPrice = isOverLean ? overPrice : underPrice;
-  const kalshiAgrees = (isOverLean && kalshiFavorsOver) || (isUnderLean && kalshiFavorsUnder);
-  const kalshiDisagrees = (isOverLean && kalshiFavorsUnder) || (isUnderLean && kalshiFavorsOver);
-
-  const priceTooExpensive = relevantPrice < 1.77;
-  const priceFair = relevantPrice >= 1.87;
-  const priceNearEven = relevantPrice >= 1.93;
-
-  if (priceTooExpensive) {
-    return { label: 'PASS', reason: `Kalshi already priced this — too expensive (${fmt(overPrice)}/${fmt(underPrice)})` };
-  }
-
-  if (kalshiDisagrees && isStrong) {
-    if (STADIUM_NOTES[venue]?.windReliability === 'LOW') {
-      return { label: 'TARGET', reason: `Downgraded from PRIME TARGET — wind data unreliable at this park (${STADIUM_NOTES[venue].notes}) — maximum gap (${fmt(overPrice)}/${fmt(underPrice)})` };
-    }
-    return { label: 'PRIME TARGET', reason: `Bot strongly disagrees with Kalshi pricing — maximum gap (${fmt(overPrice)}/${fmt(underPrice)})` };
-  }
-
-  if (kalshiDisagrees && isMedium) {
-    return { label: 'TARGET', reason: `Bot leans against Kalshi pricing — gap exists (${fmt(overPrice)}/${fmt(underPrice)})` };
-  }
-
-  if (kalshiAgrees && priceNearEven && isStrong) {
-    return { label: 'SHARP', reason: `Kalshi agrees but price still fair — strong signal at good price (${fmt(overPrice)}/${fmt(underPrice)})` };
-  }
-
-  if (kalshiAgrees && priceFair) {
-    return { label: 'CONSIDER', reason: `Kalshi agrees, price acceptable (${fmt(overPrice)}/${fmt(underPrice)})` };
-  }
-
-  return { label: 'PASS', reason: `Kalshi agrees but price not favorable enough (${fmt(overPrice)}/${fmt(underPrice)})` };
-}
 async function getOdds() {
   try {
     const res = await axios.get('https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/', {
@@ -1206,13 +1395,28 @@ async function getKalshiMLBPrices(games, today) {
     // Bid prices overstate the payout by the spread on every market, which
     // made every detected edge systematically optimistic. Falls back to the
     // bid only when no ask is posted (illiquid book).
-    const overCost = parseFloat(best.yes_ask_dollars) > 0 ? best.yes_ask_dollars : best.yes_bid_dollars;
-    const underCost = parseFloat(best.no_ask_dollars) > 0 ? best.no_ask_dollars : best.no_bid_dollars;
-    const overPrice = kalshiDollarsToDecimal(overCost);
-    const underPrice = kalshiDollarsToDecimal(underCost);
+    const askOrBid = (ask, bid) => parseFloat(ask) > 0 ? parseFloat(ask) : (parseFloat(bid) > 0 ? parseFloat(bid) : null);
+
+    // The probability model evaluates EVERY strike for the game, so collect
+    // all of them (with tickers, needed later for CLV close-price capture),
+    // alongside the nearest-strike display summary the console/email use.
+    const allStrikes = gameMarkets
+      .filter(m => m.floor_strike != null)
+      .map(m => ({
+        strike: m.floor_strike,
+        ticker: m.ticker,
+        overCost: askOrBid(m.yes_ask_dollars, m.yes_bid_dollars),
+        underCost: askOrBid(m.no_ask_dollars, m.no_bid_dollars),
+      }))
+      .filter(s => s.overCost != null && s.underCost != null);
+
+    const overCost = askOrBid(best.yes_ask_dollars, best.yes_bid_dollars);
+    const underCost = askOrBid(best.no_ask_dollars, best.no_bid_dollars);
+    const overPrice = overCost != null ? 1 / overCost : null;
+    const underPrice = underCost != null ? 1 / underCost : null;
     if (overPrice != null && underPrice != null) {
-      priceMap.set(`${away}|${home}|${gameNumber || 1}`, { overPrice, underPrice, strike: best.floor_strike });
-      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
+      priceMap.set(`${away}|${home}|${gameNumber || 1}`, { overPrice, underPrice, strike: best.floor_strike, strikes: allStrikes });
+      appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x strikes=${allStrikes.length}`);
     } else {
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=BAD_PRICE_DATA strike=${best.floor_strike} yes=${best.yes_bid_dollars} no=${best.no_bid_dollars}`);
     }
@@ -1468,32 +1672,37 @@ async function getTodayGames(opts = {}) {
     if (kalshi) gamesWithKalshi++;
     appendDaemonLog(`[KALSHI-DEBUG] ${gameLabel} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
     const stadiumNotes = STADIUM_NOTES[venue];
-    const isOverLean = OVER_LEANS.includes(analysis.lean);
-    const edge = detectEdge(analysis.lean, kalshi, venue, odds?.total);
+    const isDome = !coords?.outDirs;
 
-    // The Odds API is only used to source Total_Line/Side_Juice for logging —
-    // edge detection itself is entirely Kalshi-based. When the Odds API has
-    // no line for a game (outage or just missing coverage), fall back to
-    // Kalshi's own matched strike/price so a real TARGET/PRIME TARGET call
-    // still gets logged instead of being silently dropped.
-    const kalshiDerivedOdds = (!odds && kalshi && kalshi.strike != null) ? {
-      total: kalshi.strike.toFixed(1),
-      overJuice: decimalToAmericanOdds(kalshi.overPrice),
-      underJuice: decimalToAmericanOdds(kalshi.underPrice),
-    } : null;
-    const loggableOdds = odds || kalshiDerivedOdds;
+    // The probability model is the decision-maker: project the total, price
+    // P(over) for every Kalshi strike, and act only on a fee-adjusted edge.
+    // The signal scorecard (analysis) is retained for narrative, the Signals
+    // regression column, and the rain-out AVOID guard.
+    const projection = analysis.lean === 'AVOID' ? null
+      : projectGameTotal({ awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, stadiumNotes, weather, coords, venue, isDome });
+    const edge = analysis.lean === 'AVOID' ? null : detectProbEdge(projection, kalshi?.strikes);
 
-    const isHighConfEdge = analysis.confidence === 'MEDIUM' || analysis.confidence === 'HIGH';
-    if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET') && loggableOdds && isHighConfEdge) {
-      const isDome = !coords?.outDirs;
+    const isOverLean = edge?.side ? edge.side === 'OVER' : OVER_LEANS.includes(analysis.lean);
+
+    if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET')) {
+      // Log the bet we'd actually place: the chosen strike as the line, and
+      // juice derived from the fee-inclusive cost so recorded P&L nets fees.
+      const chosen = (kalshi?.strikes || []).find(s => s.strike === edge.strike);
+      const pickOdds = {
+        total: edge.strike.toFixed(1),
+        overJuice: chosen ? decimalToAmericanOdds(1 / (chosen.overCost + kalshiFee(chosen.overCost))) : null,
+        underJuice: chosen ? decimalToAmericanOdds(1 / (chosen.underCost + kalshiFee(chosen.underCost))) : null,
+      };
       const signalFact = pitcherFact(awayStats, homeStats, awayPitcher, homePitcher, isOverLean)
         || parkFactorFact(stadiumNotes, venue, isOverLean)
         || windFact(weather, coords, stadiumNotes, venue, isOverLean)
         || opsFact(awayHitters, homeHitters, away, home, isOverLean)
-        || 'No single dominant signal — the call comes from several smaller factors combined.';
-      const marketFact = marketSentence(kalshi, isOverLean);
+        || 'No single dominant signal — the call comes from the runs projection.';
+      const marketFact = `Model projects ${projection.projectedTotal.toFixed(2)} runs — P(${edge.side} ${edge.strike}) = ${(edge.ourProb * 100).toFixed(1)}% vs market cost ${(edge.effectiveCost * 100).toFixed(1)}% including fees.`;
       const riskFact = riskFactorFact(analysis.weighted, isOverLean, stadiumNotes, isDome, analysis.confidence);
-      logPick(today, gameLabel, analysis.lean, analysis.confidence, edge.label, loggableOdds, { signalFact, marketFact, riskFact, signals: encodeSignals(analysis.weighted) });
+      logPick(today, gameLabel, analysis.lean, analysis.confidence, edge.label, pickOdds,
+        { signalFact, marketFact, riskFact, signals: encodeSignals(analysis.weighted) },
+        { side: edge.side, modelTotal: projection.projectedTotal, modelProb: edge.ourProb, entryCost: edge.cost, ticker: edge.ticker });
     }
 
     if (explain) {
@@ -1529,6 +1738,12 @@ async function getTodayGames(opts = {}) {
         ? `Kalshi: Over ${kalshi.overPrice.toFixed(2)}x / Under ${kalshi.underPrice.toFixed(2)}x`
         : `Kalshi: No Kalshi market found.`;
       console.log(kalshiLine);
+
+      if (projection && edge?.ourProb != null) {
+        console.log(`Model: ${projection.projectedTotal.toFixed(2)} projected runs | best value: ${edge.side} ${edge.strike} at ${(edge.ourProb * 100).toFixed(1)}% model vs ${(edge.effectiveCost * 100).toFixed(1)}% cost (edge ${(edge.edge * 100).toFixed(1)}%)`);
+      } else if (projection) {
+        console.log(`Model: ${projection.projectedTotal.toFixed(2)} projected runs`);
+      }
 
       const depth = narrativeDepth(analysis.lean);
       if (depth > 0) {
