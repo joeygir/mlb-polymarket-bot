@@ -22,6 +22,30 @@ function writeBotStatus(status) {
   }
 }
 
+// Persists which scheduled task-keys have already fired today, so a process
+// restart (crash loop, redeploy) can't forget and re-trigger a task that
+// already ran — see the catch-up scheduler in runDaemon() for why this
+// needs to survive across restarts, not just live in memory.
+const SCHEDULER_STATE_PATH = path.join(__dirname, 'scheduler_state.json');
+
+function loadSchedulerState(dateStr) {
+  try {
+    if (!fs.existsSync(SCHEDULER_STATE_PATH)) return new Set();
+    const data = JSON.parse(fs.readFileSync(SCHEDULER_STATE_PATH, 'utf8'));
+    return data.date === dateStr ? new Set(data.firedKeys || []) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSchedulerState(dateStr, triggeredKeys) {
+  try {
+    fs.writeFileSync(SCHEDULER_STATE_PATH, JSON.stringify({ date: dateStr, firedKeys: [...triggeredKeys] }));
+  } catch (err) {
+    console.error(`Failed to write scheduler_state.json: ${err.message}`);
+  }
+}
+
 const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
 const REGRESSION_MILESTONE_TARGET = 200;
 
@@ -1618,6 +1642,13 @@ function runDaemon() {
   // silently skipping it until tomorrow — an exact-minute match only ever
   // gets one chance per day and permanently misses it if the process isn't
   // alive at that precise minute.
+  //
+  // Persisted to disk (not just in-memory) because a crash-restart loop
+  // would otherwise forget it already caught up today on every single
+  // restart, re-firing update-results (and its GitHub auto-push) every
+  // time the process comes back up — exactly what happened in production:
+  // 170+ auto-commits in one day once the in-memory-only version of this
+  // logic shipped.
   let triggeredKeys = new Set();
   let lastCheckedDate = null;
   let lastLoggedAdjustmentDate = null;
@@ -1631,7 +1662,7 @@ function runDaemon() {
       const dateStr = now.toISOString().split('T')[0];
 
       if (dateStr !== lastCheckedDate) {
-        triggeredKeys = new Set();
+        triggeredKeys = loadSchedulerState(dateStr);
         lastCheckedDate = dateStr;
       }
 
@@ -1655,6 +1686,7 @@ function runDaemon() {
         if (nowMinutes < scheduledMinutes) continue;
 
         triggeredKeys.add(key);
+        saveSchedulerState(dateStr, triggeredKeys);
         if (nowMinutes > scheduledMinutes) {
           appendDaemonLog(`Catch-up trigger: ${s.name} scheduled for ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')} UTC, running now at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} (process wasn't running at the scheduled time)`);
         }
