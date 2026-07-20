@@ -15,7 +15,18 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 if (DATA_DIR !== __dirname && !fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const PICKS_LOG = path.join(DATA_DIR, 'picks_log.csv');
-const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact'];
+const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact','Signals'];
+
+// Compact machine-readable encoding of the weighted signals that fired for a
+// pick, e.g. "pitcher_solid:UNDER:1|park_pitcher:UNDER:1" — this is what
+// makes the 200-pick recalibration possible: hit rate can be regressed per
+// signal ID, which the human-readable Signal_Fact prose can't support.
+function encodeSignals(weighted) {
+  return (weighted || [])
+    .filter(w => w.id)
+    .map(w => `${w.id}:${w.direction}:${w.tier}`)
+    .join('|');
+}
 
 // One-time seed: on first run with a fresh volume, copy the repo's committed
 // picks_log.csv into DATA_DIR so history carries over.
@@ -107,6 +118,7 @@ function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}) 
     Date: date, Game: game, Lean: lean, Confidence: confidence, Edge_Label: edgeLabel,
     Total_Line: odds.total, Side: side, Side_Juice: sideJuice, Stake: '', Result: '', Hit_Miss: '', PnL: '',
     Signal_Fact: reasoning.signalFact || '', Market_Fact: reasoning.marketFact || '', Risk_Fact: reasoning.riskFact || '',
+    Signals: reasoning.signals || '',
   };
 
   if (!fs.existsSync(PICKS_LOG)) {
@@ -130,6 +142,7 @@ function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}) 
       Signal_Fact: headers.includes('Signal_Fact') ? r.Signal_Fact : '',
       Market_Fact: headers.includes('Market_Fact') ? r.Market_Fact : '',
       Risk_Fact: headers.includes('Risk_Fact') ? r.Risk_Fact : '',
+      Signals: headers.includes('Signals') ? r.Signals : '',
     }));
     migrated.push(newRow);
     fs.writeFileSync(PICKS_LOG, CSV_HEADERS.join(',') + '\n' + migrated.map(r => rowToCSV(r, CSV_HEADERS)).join('\n') + '\n');
@@ -413,11 +426,15 @@ const SEVERE_RAIN_PROB_THRESHOLD = 70;
 
 function computeConfidence(weightedSignals) {
   const count = (tier, direction) => weightedSignals.filter(w => w.tier === tier && w.direction === direction).length;
-  const tier1Max = Math.max(count(1, 'OVER'), count(1, 'UNDER'));
-  const tier2Max = Math.max(count(2, 'OVER'), count(2, 'UNDER'));
+  // NET counts, not max: confidence reflects how decisively the signals point
+  // one way. The old max-based version graded 2 Tier-1 OVERs + 3 Tier-1
+  // UNDERs as "HIGH" — heavily contested reads were labeled as the most
+  // trustworthy. Opposing signals now cancel before grading.
+  const tier1Net = Math.abs(count(1, 'OVER') - count(1, 'UNDER'));
+  const tier2Net = Math.abs(count(2, 'OVER') - count(2, 'UNDER'));
 
-  if (tier1Max >= 2) return 'HIGH';
-  if (tier1Max >= 1 || tier2Max >= 3) return 'MEDIUM';
+  if (tier1Net >= 2) return 'HIGH';
+  if (tier1Net >= 1 || tier2Net >= 3) return 'MEDIUM';
   return 'LOW';
 }
 
@@ -509,12 +526,21 @@ async function getXERA(playerId) {
   }
 }
 
-async function getTeamHitters(teamId) {
+async function getTeamHitters(teamId, lineupPlayerIds) {
   try {
-    const roster = await axios.get(
-      `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active`
-    );
-    const batters = roster.data.roster.filter(p => p.position.code !== '1');
+    // Prefer the actual posted lineup (from schedule hydrate=lineups) when
+    // MLB has published it — the roster fallback takes the first 9 position
+    // players in arbitrary roster order, which can include bench bats and
+    // miss the stars actually playing today.
+    let batters;
+    if (lineupPlayerIds && lineupPlayerIds.length >= 9) {
+      batters = lineupPlayerIds.map(id => ({ person: { id } }));
+    } else {
+      const roster = await axios.get(
+        `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active`
+      );
+      batters = roster.data.roster.filter(p => p.position.code !== '1');
+    }
 
     const statsPromises = batters.slice(0, 9).map(async (player) => {
       try {
@@ -569,9 +595,13 @@ async function getBullpenStats(teamId, starterPlayerId) {
         .catch(() => null)
     ));
 
+    // Weight by innings pitched — an unweighted mean counts a 6-IP mop-up
+    // arm the same as a 40-IP setup man, letting fringe relievers swing the
+    // team number well away from how the bullpen actually pitches most nights.
     const qualified = statLines.filter(s => s && parseFloat(s.inningsPitched) >= 5);
-    const era = qualified.length ? qualified.reduce((sum, s) => sum + parseFloat(s.era), 0) / qualified.length : null;
-    const whip = qualified.length ? qualified.reduce((sum, s) => sum + parseFloat(s.whip), 0) / qualified.length : null;
+    const totalIP = qualified.reduce((sum, s) => sum + parseFloat(s.inningsPitched), 0);
+    const era = totalIP > 0 ? qualified.reduce((sum, s) => sum + parseFloat(s.era) * parseFloat(s.inningsPitched), 0) / totalIP : null;
+    const whip = totalIP > 0 ? qualified.reduce((sum, s) => sum + parseFloat(s.whip) * parseFloat(s.inningsPitched), 0) / totalIP : null;
 
     result = { era, whip };
   } catch {
@@ -588,10 +618,10 @@ function scoreBullpen(awayBullpen, homeBullpen) {
   let overScore = 0;
   let underScore = 0;
 
-  const add = (text, direction, tier) => {
+  const add = (text, direction, tier, id) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ text, direction, tier, weight });
+    weighted.push({ text, direction, tier, weight, id });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
 
@@ -600,9 +630,9 @@ function scoreBullpen(awayBullpen, homeBullpen) {
     if (!bullpen || bullpen.era == null) continue;
 
     if (bullpen.era >= 4.50) {
-      add(`${side} poor bullpen quality — late innings vulnerable`, 'OVER', 2);
+      add(`${side} poor bullpen quality — late innings vulnerable`, 'OVER', 2, 'bullpen_poor');
     } else if (bullpen.era < 3.20) {
-      add(`${side} elite bullpen quality`, 'UNDER', 2);
+      add(`${side} elite bullpen quality`, 'UNDER', 2, 'bullpen_elite');
     }
   }
 
@@ -652,10 +682,10 @@ function scorePitchers(awayStats, homeStats) {
   let overScore = 0;
   let underScore = 0;
 
-  const add = (text, direction, tier) => {
+  const add = (text, direction, tier, id) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ text, direction, tier, weight });
+    weighted.push({ text, direction, tier, weight, id });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
 
@@ -671,20 +701,20 @@ function scorePitchers(awayStats, homeStats) {
 
     // Tier 1 — starting pitcher xERA is the primary quality signal.
     if (isElite) {
-      add(`${side} pitcher ${qualityLabel} — elite, suppresses scoring`, 'UNDER', 1);
+      add(`${side} pitcher ${qualityLabel} — elite, suppresses scoring`, 'UNDER', 1, 'pitcher_elite');
     } else if (isSolid) {
-      add(`${side} pitcher ${qualityLabel} — solid, mild under lean`, 'UNDER', 1);
+      add(`${side} pitcher ${qualityLabel} — solid, mild under lean`, 'UNDER', 1, 'pitcher_solid');
     } else if (isHittable) {
-      add(`${side} pitcher ${qualityLabel} — hittable, over lean`, 'OVER', 1);
+      add(`${side} pitcher ${qualityLabel} — hittable, over lean`, 'OVER', 1, 'pitcher_hittable');
     }
 
     // Tier 2 — ERA-xERA gap is a luck/regression indicator.
     if (usingXera) {
       const gap = stats.era - stats.xera;
       if (gap < -1.0) {
-        add(`${side} ERA-xERA gap — pitcher has been lucky, regression risk`, 'OVER', 2);
+        add(`${side} ERA-xERA gap — pitcher has been lucky, regression risk`, 'OVER', 2, 'era_gap_lucky');
       } else if (gap > 1.0) {
-        add(`${side} ERA-xERA gap — pitcher has been unlucky, expect improvement`, 'UNDER', 2);
+        add(`${side} ERA-xERA gap — pitcher has been unlucky, expect improvement`, 'UNDER', 2, 'era_gap_unlucky');
       }
     }
   }
@@ -700,10 +730,10 @@ function scoreLineup(teamHitters, label) {
 
   if (!teamHitters) return { overScore, underScore, signals, weighted };
 
-  const add = (text, direction, tier) => {
+  const add = (text, direction, tier, id) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ text, direction, tier, weight });
+    weighted.push({ text, direction, tier, weight, id });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
 
@@ -716,7 +746,7 @@ function scoreLineup(teamHitters, label) {
   // disagreement (or missing data on either side) is treated as neutral.
   if (recentDir != null && recentDir === seasonDir) {
     const verb = recentDir === 'OVER' ? 'hot' : 'cold';
-    add(`${label} lineup ${verb} — recent OPS ${recentOps.toFixed(3)} and season OPS ${seasonOps.toFixed(3)} agree`, recentDir, 2);
+    add(`${label} lineup ${verb} — recent OPS ${recentOps.toFixed(3)} and season OPS ${seasonOps.toFixed(3)} agree`, recentDir, 2, recentDir === 'OVER' ? 'lineup_hot' : 'lineup_cold');
   } else {
     if (recentOps != null) signals.push(`${label} lineup OPS last 15 games: ${recentOps.toFixed(3)}`);
     if (seasonOps != null) signals.push(`${label} lineup season OPS: ${seasonOps.toFixed(3)}`);
@@ -738,10 +768,10 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   let underScore = 0;
   const stadiumNotes = STADIUM_NOTES[venue];
 
-  const add = (text, direction, tier) => {
+  const add = (text, direction, tier, id) => {
     signals.push(text);
     const weight = TIER_WEIGHTS[tier];
-    weighted.push({ text, direction, tier, weight });
+    weighted.push({ text, direction, tier, weight, id });
     if (direction === 'OVER') overScore += weight; else underScore += weight;
   };
   const merge = (result) => {
@@ -755,9 +785,9 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
   if (stadiumNotes?.parkFactor != null) {
     const pf = stadiumNotes.parkFactor;
     if (pf > 1.08) {
-      add(`Hitter-friendly park (factor ${pf.toFixed(2)})`, 'OVER', 1);
+      add(`Hitter-friendly park (factor ${pf.toFixed(2)})`, 'OVER', 1, 'park_hitter');
     } else if (pf < 0.95) {
-      add(`Pitcher-friendly park (factor ${pf.toFixed(2)})`, 'UNDER', 1);
+      add(`Pitcher-friendly park (factor ${pf.toFixed(2)})`, 'UNDER', 1, 'park_pitcher');
     } else {
       signals.push(`Park factor: ${pf.toFixed(2)}`);
     }
@@ -778,16 +808,16 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
 
     if (maxWind >= 15 && isOut) {
       const text = `Wind OUT at ${maxWind}mph ${windDir} — ball carries, HR risk up`;
-      if (isHighWindPark) add(text, 'OVER', 1); else signals.push(text);
+      if (isHighWindPark) add(text, 'OVER', 1, 'wind_out_strong'); else signals.push(text);
     } else if (maxWind >= 10 && isOut) {
       const text = `Wind OUT at ${maxWind}mph ${windDir} — mild carry boost`;
-      if (isHighWindPark) add(text, 'OVER', 1); else signals.push(text);
+      if (isHighWindPark) add(text, 'OVER', 1, 'wind_out_mild'); else signals.push(text);
     } else if (maxWind >= 15 && isIn) {
       const text = `Wind IN at ${maxWind}mph ${windDir} — fly balls die, pitchers favored`;
-      if (isHighWindPark) add(text, 'UNDER', 1); else signals.push(text);
+      if (isHighWindPark) add(text, 'UNDER', 1, 'wind_in_strong'); else signals.push(text);
     } else if (maxWind >= 10 && isIn) {
       const text = `Wind IN at ${maxWind}mph ${windDir} — mild suppression`;
-      if (isHighWindPark) add(text, 'UNDER', 1); else signals.push(text);
+      if (isHighWindPark) add(text, 'UNDER', 1, 'wind_in_mild'); else signals.push(text);
     } else if (maxWind >= 10) {
       signals.push(`Crosswind at ${maxWind}mph ${windDir} — minimal scoring effect`);
     } else {
@@ -800,18 +830,23 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
       signals.push(`⚡ VERIFY WIND — ${stadiumNotes.notes}`);
     }
 
-    // Tier 1 — park factor / altitude environment.
+    // Altitude is display-only: Coors' parkFactor (1.30) already encodes the
+    // altitude effect, and it fires its own Tier-1 OVER above. Scoring
+    // altitude separately double-counted the same physical cause, giving
+    // Coors games an automatic two-Tier-1 head start (and HIGH confidence)
+    // before any pitcher/lineup signal was even considered — the market
+    // already prices Coors, so that head start was pure noise.
     if (stadiumNotes?.altitudeBoost) {
-      add(`Altitude effect at ${venue} — +${stadiumNotes.altitudeBoost} OVER boost regardless of wind direction`, 'OVER', 1);
+      signals.push(`Altitude park (${venue}) — effect already captured in park factor`);
     }
 
     // Tier 2 — temperature extremes only (90F+ / 50F-); mild warm/cool bands display only.
     if (avgTemp >= 90) {
-      add(`Very hot (${avgTemp}F) — ball carries significantly`, 'OVER', 2);
+      add(`Very hot (${avgTemp}F) — ball carries significantly`, 'OVER', 2, 'temp_hot');
     } else if (avgTemp >= 80) {
       signals.push(`Warm (${avgTemp}F) — slight carry boost`);
     } else if (avgTemp <= 50) {
-      add(`Cold (${avgTemp}F) — ball suppressed noticeably`, 'UNDER', 2);
+      add(`Cold (${avgTemp}F) — ball suppressed noticeably`, 'UNDER', 2, 'temp_cold');
     } else if (avgTemp <= 60) {
       signals.push(`Cool (${avgTemp}F) — mild suppression`);
     } else {
@@ -872,13 +907,21 @@ function analyzeGame(weather, venue, awayStats, homeStats, awayHitters, homeHitt
 // only supplies the total-line number used elsewhere to pick the closest
 // Kalshi strike. Price thresholds below are the decimal-odds equivalents of
 // the old American-juice thresholds (-130 ≈ 1.77x, -115 ≈ 1.87x, -108 ≈ 1.93x).
-function detectEdge(lean, kalshi, venue) {
+function detectEdge(lean, kalshi, venue, bookTotal) {
   if (lean === 'AVOID' || lean === 'NEUTRAL' || lean === 'DOME — NEUTRAL') {
     return null;
   }
 
   if (!kalshi) {
     return { label: 'No Kalshi market', reason: 'No Kalshi market found — skipping edge scoring.' };
+  }
+
+  // The lean was formed around the sportsbook's total; if the closest Kalshi
+  // strike sits a full run or more away from that number, the two aren't
+  // talking about the same bet — an OVER lean at 8.5 says nothing about the
+  // over at 10.5 — so refuse to call the price gap an edge.
+  if (bookTotal != null && kalshi.strike != null && Math.abs(kalshi.strike - parseFloat(bookTotal)) >= 1) {
+    return { label: 'PASS', reason: `Kalshi strike ${kalshi.strike} is too far from the book total ${bookTotal} for an apples-to-apples edge call.` };
   }
 
   const isOverLean = ['STRONG OVER', 'OVER', 'LEAN OVER', 'DOME — LEAN OVER'].includes(lean);
@@ -1159,8 +1202,14 @@ async function getKalshiMLBPrices(games, today) {
     }
 
     // Yes = over the strike, No = under, matching Kalshi's "Total Runs?" phrasing.
-    const overPrice = kalshiDollarsToDecimal(best.yes_bid_dollars);
-    const underPrice = kalshiDollarsToDecimal(best.no_bid_dollars);
+    // Price off the ASK — that's what you'd actually pay to enter the position.
+    // Bid prices overstate the payout by the spread on every market, which
+    // made every detected edge systematically optimistic. Falls back to the
+    // bid only when no ask is posted (illiquid book).
+    const overCost = parseFloat(best.yes_ask_dollars) > 0 ? best.yes_ask_dollars : best.yes_bid_dollars;
+    const underCost = parseFloat(best.no_ask_dollars) > 0 ? best.no_ask_dollars : best.no_bid_dollars;
+    const overPrice = kalshiDollarsToDecimal(overCost);
+    const underPrice = kalshiDollarsToDecimal(underCost);
     if (overPrice != null && underPrice != null) {
       priceMap.set(`${away}|${home}|${gameNumber || 1}`, { overPrice, underPrice, strike: best.floor_strike });
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
@@ -1339,7 +1388,7 @@ function printExplain({ away, home, venue, awayPitcher, homePitcher, awayStats, 
 async function getTodayGames(opts = {}) {
   const explain = !!opts.explain;
   const today = new Date().toISOString().split('T')[0];
-  const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team`;
+  const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team,lineups`;
   const [response, oddsMap] = await Promise.all([axios.get(url), getOdds()]);
   const games = response.data.dates[0]?.games || [];
 
@@ -1398,11 +1447,14 @@ async function getTodayGames(opts = {}) {
       ? await getWeather(coords.lat, coords.lon, game.gameDate)
       : null;
 
+    const awayLineupIds = (game.lineups?.awayPlayers || []).map(p => p.id).filter(Boolean);
+    const homeLineupIds = (game.lineups?.homePlayers || []).map(p => p.id).filter(Boolean);
+
     const [awayStats, homeStats, awayHitters, homeHitters, awayBullpen, homeBullpen] = await Promise.all([
       getPitcherStats(awayPitcher, awayPitcherId),
       getPitcherStats(homePitcher, homePitcherId),
-      getTeamHitters(awayId),
-      getTeamHitters(homeId),
+      getTeamHitters(awayId, awayLineupIds),
+      getTeamHitters(homeId, homeLineupIds),
       getBullpenStats(awayId, awayPitcherId),
       getBullpenStats(homeId, homePitcherId),
     ]);
@@ -1417,7 +1469,7 @@ async function getTodayGames(opts = {}) {
     appendDaemonLog(`[KALSHI-DEBUG] ${gameLabel} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
     const stadiumNotes = STADIUM_NOTES[venue];
     const isOverLean = OVER_LEANS.includes(analysis.lean);
-    const edge = detectEdge(analysis.lean, kalshi, venue);
+    const edge = detectEdge(analysis.lean, kalshi, venue, odds?.total);
 
     // The Odds API is only used to source Total_Line/Side_Juice for logging —
     // edge detection itself is entirely Kalshi-based. When the Odds API has
@@ -1441,7 +1493,7 @@ async function getTodayGames(opts = {}) {
         || 'No single dominant signal — the call comes from several smaller factors combined.';
       const marketFact = marketSentence(kalshi, isOverLean);
       const riskFact = riskFactorFact(analysis.weighted, isOverLean, stadiumNotes, isDome, analysis.confidence);
-      logPick(today, gameLabel, analysis.lean, analysis.confidence, edge.label, loggableOdds, { signalFact, marketFact, riskFact });
+      logPick(today, gameLabel, analysis.lean, analysis.confidence, edge.label, loggableOdds, { signalFact, marketFact, riskFact, signals: encodeSignals(analysis.weighted) });
     }
 
     if (explain) {
