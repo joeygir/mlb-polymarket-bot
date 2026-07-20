@@ -9,8 +9,12 @@ const dns = require('dns');
 // resolution avoids that dead end entirely.
 dns.setDefaultResultOrder('ipv4first');
 
-const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
-const BOT_STATUS_PATH = path.join(__dirname, 'bot_status.json');
+// Mirrors index.js: DATA_DIR points at a persistent volume when set (see the
+// DATA_DIR comment at the top of index.js), so the email reads the same
+// picks/status files the bot writes.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const PICKS_LOG = path.join(DATA_DIR, 'picks_log.csv');
+const BOT_STATUS_PATH = path.join(DATA_DIR, 'bot_status.json');
 
 // Reads the self-check snapshot index.js writes at the end of every
 // getTodayGames() run, so the email can confirm the bot actually ran today
@@ -187,7 +191,7 @@ function getOverallStats() {
     hitRate: (hits / resolved.length * 100).toFixed(1),
     totalPnL: totalPnL.toFixed(2),
     leanStats,
-    streak: streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? 'S' : ''}` : 'None',
+    streak: streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? (streakType === 'MISS' ? 'ES' : 'S') : ''}` : 'None',
   };
 }
 

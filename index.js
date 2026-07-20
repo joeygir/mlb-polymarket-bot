@@ -5,14 +5,30 @@ const path = require('path');
 const crypto = require('crypto');
 const { sendEmailReport, testEmailReport } = require('./email');
 
-const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
+// Railway's container filesystem is rebuilt from the repo image on every
+// deploy, wiping anything written at runtime (logged picks, scheduler state,
+// bot status). Setting DATA_DIR to a mounted persistent volume (e.g. /data
+// on Railway: service → Attach Volume, mount path /data, then env var
+// DATA_DIR=/data) makes all runtime state survive restarts and deploys.
+// Unset, everything behaves exactly as before (files beside the code).
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+if (DATA_DIR !== __dirname && !fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const PICKS_LOG = path.join(DATA_DIR, 'picks_log.csv');
 const CSV_HEADERS = ['Date','Game','Lean','Confidence','Edge_Label','Total_Line','Side','Side_Juice','Stake','Result','Hit_Miss','PnL','Signal_Fact','Market_Fact','Risk_Fact'];
+
+// One-time seed: on first run with a fresh volume, copy the repo's committed
+// picks_log.csv into DATA_DIR so history carries over.
+if (DATA_DIR !== __dirname && !fs.existsSync(PICKS_LOG) && fs.existsSync(path.join(__dirname, 'picks_log.csv'))) {
+  fs.copyFileSync(path.join(__dirname, 'picks_log.csv'), PICKS_LOG);
+  console.log(`Seeded ${PICKS_LOG} from repo copy`);
+}
 
 // Self-check snapshot written at the end of every getTodayGames() run so
 // the email can report whether the bot actually ran today and whether its
 // data sources (Odds API, Kalshi) looked healthy — not committed to git,
 // it's transient run-to-run state read fresh by email.js each send.
-const BOT_STATUS_PATH = path.join(__dirname, 'bot_status.json');
+const BOT_STATUS_PATH = path.join(DATA_DIR, 'bot_status.json');
 
 function writeBotStatus(status) {
   try {
@@ -26,7 +42,7 @@ function writeBotStatus(status) {
 // restart (crash loop, redeploy) can't forget and re-trigger a task that
 // already ran — see the catch-up scheduler in runDaemon() for why this
 // needs to survive across restarts, not just live in memory.
-const SCHEDULER_STATE_PATH = path.join(__dirname, 'scheduler_state.json');
+const SCHEDULER_STATE_PATH = path.join(DATA_DIR, 'scheduler_state.json');
 
 function loadSchedulerState(dateStr) {
   try {
@@ -124,7 +140,12 @@ function logPick(date, game, lean, confidence, edgeLabel, odds, reasoning = {}) 
 
 function calcPnL(hitMiss, sideJuice, stake) {
   if (hitMiss === 'PUSH') return 0;
-  const juice = parseInt(sideJuice);
+  let juice = parseInt(sideJuice);
+  // Valid American odds are <= -100 or >= +100. Anything in between (or NaN)
+  // is corrupt data — early rows carry impossible values like "-19" from the
+  // odds-averaging bug — so fall back to the standard -110 vig rather than
+  // paying out a wildly inflated (or NaN) return.
+  if (isNaN(juice) || Math.abs(juice) < 100) juice = -110;
   const unit = parseFloat(stake) > 0 ? parseFloat(stake) : 10;
   if (hitMiss === 'HIT') return juice < 0 ? +(unit * 100 / Math.abs(juice)).toFixed(2) : +(unit * juice / 100).toFixed(2);
   return -unit;
@@ -152,13 +173,32 @@ async function fetchFinalScores(date) {
   try {
     const res = await axios.get(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${date}&hydrate=linescore,team`);
     const games = res.data.dates[0]?.games || [];
+
+    // Doubleheaders share a matchup name, so keys must carry the game number
+    // — otherwise the second final overwrites the first and a pick can get
+    // graded against the wrong game's total. The plain (unsuffixed) key is
+    // still written when the matchup appears only once that day, so rows
+    // logged before doubleheader labeling existed keep grading correctly.
+    const matchupCounts = {};
+    for (const g of games) {
+      const key = `${g.teams.away.team.name} @ ${g.teams.home.team.name}`;
+      matchupCounts[key] = (matchupCounts[key] || 0) + 1;
+    }
+
     const scoreMap = {};
     for (const g of games) {
       if (g.status.abstractGameState !== 'Final') continue;
-      const key = `${g.teams.away.team.name} @ ${g.teams.home.team.name}`;
+      const base = `${g.teams.away.team.name} @ ${g.teams.home.team.name}`;
       const awayRuns = g.teams.away.score;
       const homeRuns = g.teams.home.score;
-      if (awayRuns != null && homeRuns != null) scoreMap[key] = awayRuns + homeRuns;
+      if (awayRuns == null || homeRuns == null) continue;
+      const total = awayRuns + homeRuns;
+      if (matchupCounts[base] > 1 || g.doubleHeader !== 'N') {
+        scoreMap[`${base} (Game ${g.gameNumber || 1})`] = total;
+        if (matchupCounts[base] === 1) scoreMap[base] = total;
+      } else {
+        scoreMap[base] = total;
+      }
     }
     return scoreMap;
   } catch {
@@ -255,7 +295,7 @@ function printSummary() {
     else if (hm === streakType) { streakCount++; }
     else break;
   }
-  console.log(`\nCurrent streak     : ${streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? 'S' : ''}` : 'None'}`);
+  console.log(`\nCurrent streak     : ${streakCount > 0 ? `${streakCount} ${streakType}${streakCount > 1 ? (streakType === 'MISS' ? 'ES' : 'S') : ''}` : 'None'}`);
   console.log('\n============================\n');
 }
 
@@ -381,22 +421,28 @@ function computeConfidence(weightedSignals) {
   return 'LOW';
 }
 
-async function getPitcherStats(pitcherName) {
+async function getPitcherStats(pitcherName, pitcherId) {
   try {
-    const search = await axios.get(
-      `https://statsapi.mlb.com/api/v1/people/search?names=${encodeURIComponent(pitcherName)}`
-    );
-    const player = search.data.people?.[0];
-    if (!player) return null;
+    // Prefer the pitcher ID from the schedule's probablePitcher — a name
+    // search takes the first hit, which can be a different player entirely
+    // for common names. Name search remains only as a fallback.
+    let playerId = pitcherId;
+    if (!playerId) {
+      const search = await axios.get(
+        `https://statsapi.mlb.com/api/v1/people/search?names=${encodeURIComponent(pitcherName)}`
+      );
+      playerId = search.data.people?.[0]?.id;
+      if (!playerId) return null;
+    }
 
     const stats = await axios.get(
-      `https://statsapi.mlb.com/api/v1/people/${player.id}/stats?stats=season&season=2026&group=pitching`
+      `https://statsapi.mlb.com/api/v1/people/${playerId}/stats?stats=season&season=${new Date().getFullYear()}&group=pitching`
     );
 
     const splits = stats.data.stats?.[0]?.splits?.[0]?.stat;
     if (!splits) return null;
 
-    let xera = await getXERA(player.id);
+    let xera = await getXERA(playerId);
     // Sanity check: xERA > 8.0 suggests unreliable small sample — skip from scoring.
     if (xera != null && xera > 8.0) xera = null;
 
@@ -447,10 +493,14 @@ function parseSavantCSV(content) {
 async function getXERA(playerId) {
   try {
     const year = new Date().getFullYear();
-    if (!savantXeraTable || savantXeraTable.year !== year) {
+    // Cache per calendar day, not per year — the leaderboard updates daily,
+    // and a long-lived daemon holding a year-keyed cache would serve xERA
+    // values frozen at whenever the process started.
+    const day = new Date().toISOString().split('T')[0];
+    if (!savantXeraTable || savantXeraTable.day !== day) {
       const url = `https://baseballsavant.mlb.com/leaderboard/custom?year=${year}&type=pitcher&filter=&sort=4&sortDir=asc&min=1&selections=p_game,p_formatted_ip,p_era,xera&chart=false&x=p_era&y=xera&r=no&toggledStat=&csv=true`;
       const res = await axios.get(url);
-      savantXeraTable = { year, rows: parseSavantCSV(res.data) };
+      savantXeraTable = { day, rows: parseSavantCSV(res.data) };
     }
     const row = savantXeraTable.rows.find(r => r.player_id === String(playerId));
     return row?.xera ? parseFloat(row.xera) : null;
@@ -468,9 +518,10 @@ async function getTeamHitters(teamId) {
 
     const statsPromises = batters.slice(0, 9).map(async (player) => {
       try {
+        const season = new Date().getFullYear();
         const [recentRes, seasonRes] = await Promise.all([
-          axios.get(`https://statsapi.mlb.com/api/v1/people/${player.person.id}/stats?stats=lastXGames&season=2026&group=hitting&limit=15`),
-          axios.get(`https://statsapi.mlb.com/api/v1/people/${player.person.id}/stats?stats=season&season=2026&group=hitting`),
+          axios.get(`https://statsapi.mlb.com/api/v1/people/${player.person.id}/stats?stats=lastXGames&season=${season}&group=hitting&limit=15`),
+          axios.get(`https://statsapi.mlb.com/api/v1/people/${player.person.id}/stats?stats=season&season=${season}&group=hitting`),
         ]);
         const recentStat = recentRes.data.stats?.[0]?.splits?.[0]?.stat;
         const seasonStat = seasonRes.data.stats?.[0]?.splits?.[0]?.stat;
@@ -498,10 +549,14 @@ async function getTeamHitters(teamId) {
   }
 }
 
+// Keyed by teamId + date: within one day's run the same team's bullpen is
+// fetched once, but a long-lived daemon gets fresh stats each day instead of
+// serving numbers frozen at whenever the process happened to start.
 const bullpenCache = new Map();
 
 async function getBullpenStats(teamId, starterPlayerId) {
-  if (bullpenCache.has(teamId)) return bullpenCache.get(teamId);
+  const cacheKey = `${teamId}-${new Date().toISOString().split('T')[0]}`;
+  if (bullpenCache.has(cacheKey)) return bullpenCache.get(cacheKey);
 
   let result = { era: null, whip: null };
   try {
@@ -523,7 +578,7 @@ async function getBullpenStats(teamId, starterPlayerId) {
     // keep defaults
   }
 
-  bullpenCache.set(teamId, result);
+  bullpenCache.set(cacheKey, result);
   return result;
 }
 
@@ -554,13 +609,26 @@ function scoreBullpen(awayBullpen, homeBullpen) {
   return { overScore, underScore, signals, weighted };
 }
 
-async function getWeather(lat, lon) {
+async function getWeather(lat, lon, gameStartIso) {
   try {
     const pointRes = await axios.get(`https://api.weather.gov/points/${lat},${lon}`);
     const forecastUrl = pointRes.data.properties.forecastHourly;
     const forecastRes = await axios.get(forecastUrl);
     const periods = forecastRes.data.properties.periods;
-    const window = periods.slice(0, 6);
+
+    // Window the forecast around first pitch, not around "now" — the noon-ET
+    // analysis run was previously scoring 7pm games on midday weather. Start
+    // one period before first pitch and cover roughly the game's duration;
+    // fall back to the next 6 hours when no start time is given or the game
+    // has already begun.
+    let startIdx = 0;
+    if (gameStartIso) {
+      const gameStart = new Date(gameStartIso);
+      const idx = periods.findIndex(p => new Date(p.endTime) > gameStart);
+      if (idx > 0) startIdx = idx;
+    }
+    const window = periods.slice(startIdx, startIdx + 5);
+    if (!window.length) return null;
 
     const temps = window.map(p => p.temperature);
     const winds = window.map(p => parseInt(p.windSpeed));
@@ -868,6 +936,15 @@ async function getOdds() {
         dateFormat: 'iso',
       },
     });
+    // The Odds API free tier has a monthly request quota; when it's exhausted
+    // every game shows "No odds available" with no explanation. Log the
+    // remaining balance each call so quota exhaustion is visible in daemon.log
+    // before it becomes a mystery.
+    const remaining = res.headers['x-requests-remaining'];
+    if (remaining != null) {
+      appendDaemonLog(`[ODDS-API] requests remaining this period: ${remaining}`);
+      if (parseFloat(remaining) < 50) console.log(`⚠️ Odds API quota low: ${remaining} requests remaining`);
+    }
     const oddsMap = {};
     for (const game of res.data) {
       const key = `${game.away_team}|${game.home_team}`;
@@ -880,15 +957,26 @@ async function getOdds() {
         if (over && under) lines.push({ point: over.point, overPrice: over.price, underPrice: under.price });
       }
       if (lines.length > 0) {
+        // American odds must be averaged in implied-probability space, not
+        // directly — a raw mean of e.g. -110 and +105 lands between -100 and
+        // +100, which isn't a valid American price at all. Direct averaging
+        // shipped originally and wrote impossible juice like "-19" and "+6"
+        // into picks_log.csv, inflating HIT payouts in calcPnL.
+        const americanToProb = (a) => a < 0 ? -a / (-a + 100) : 100 / (a + 100);
+        const probToAmericanStr = (p) => {
+          const a = p >= 0.5 ? -(p * 100) / (1 - p) : ((1 - p) * 100) / p;
+          return a >= 0 ? `+${Math.round(a)}` : `${Math.round(a)}`;
+        };
         const avgTotal = lines.reduce((a, b) => a + b.point, 0) / lines.length;
-        const avgOver = lines.reduce((a, b) => a + b.overPrice, 0) / lines.length;
-        const avgUnder = lines.reduce((a, b) => a + b.underPrice, 0) / lines.length;
-        const fmt = p => p > 0 ? `+${Math.round(p)}` : `${Math.round(p)}`;
+        const avgOverProb = lines.reduce((a, b) => a + americanToProb(b.overPrice), 0) / lines.length;
+        const avgUnderProb = lines.reduce((a, b) => a + americanToProb(b.underPrice), 0) / lines.length;
+        const overJuice = probToAmericanStr(avgOverProb);
+        const underJuice = probToAmericanStr(avgUnderProb);
         oddsMap[key] = {
-          display: `O/U ${avgTotal.toFixed(1)} | Over ${fmt(avgOver)} / Under ${fmt(avgUnder)} (avg of ${lines.length} books)`,
+          display: `O/U ${avgTotal.toFixed(1)} | Over ${overJuice} / Under ${underJuice} (avg of ${lines.length} books)`,
           total: avgTotal.toFixed(1),
-          overJuice: fmt(avgOver),
-          underJuice: fmt(avgUnder),
+          overJuice,
+          underJuice,
         };
       }
     }
@@ -1016,18 +1104,29 @@ async function getKalshiMLBPrices(games, today) {
     return priceMap;
   }
 
-  for (const { away, home, awayAbbr, homeAbbr, total } of games) {
-    const label = `${away} @ ${home}`;
+  for (const { away, home, awayAbbr, homeAbbr, total, gameNumber, isDoubleheader } of games) {
+    const label = `${away} @ ${home}${isDoubleheader ? ` (Game ${gameNumber})` : ''}`;
 
     if (!awayAbbr || !homeAbbr) {
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=no (missing team abbreviation) | result=SKIPPED`);
       continue;
     }
 
+    // Doubleheader event tickers carry a G-suffix after the team pair
+    // (e.g. ...MILSTLG1 / ...MILSTLG2); single games have no suffix
+    // (e.g. ...CHCBAL). Without matching the suffix to this game's number,
+    // both games' strike markets get mixed into one pool and the second
+    // game's prices overwrite the first's in the map.
     const abbrPair = `${awayAbbr}${homeAbbr}`;
-    const gameMarkets = markets.filter(m =>
-      (m.event_ticker || '').includes(abbrPair) && kalshiTickerDateToken(m.event_ticker) === todayToken
-    );
+    const suffixRe = new RegExp(`${abbrPair}(?:G(\\d))?$`);
+    const gameMarkets = markets.filter(m => {
+      const ticker = m.event_ticker || '';
+      if (kalshiTickerDateToken(ticker) !== todayToken) return false;
+      const match = ticker.match(suffixRe);
+      if (!match) return false;
+      const tickerGameNum = match[1] ? parseInt(match[1], 10) : null;
+      return isDoubleheader ? tickerGameNum === gameNumber : tickerGameNum === null;
+    });
 
     if (!gameMarkets.length) {
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=NO_TICKER_MATCH (0 markets found for date token ${todayToken})`);
@@ -1063,7 +1162,7 @@ async function getKalshiMLBPrices(games, today) {
     const overPrice = kalshiDollarsToDecimal(best.yes_bid_dollars);
     const underPrice = kalshiDollarsToDecimal(best.no_bid_dollars);
     if (overPrice != null && underPrice != null) {
-      priceMap.set(`${away}|${home}`, { overPrice, underPrice, strike: best.floor_strike });
+      priceMap.set(`${away}|${home}|${gameNumber || 1}`, { overPrice, underPrice, strike: best.floor_strike });
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=MATCHED strike=${best.floor_strike} over=${overPrice.toFixed(2)}x under=${underPrice.toFixed(2)}x`);
     } else {
       appendDaemonLog(`[KALSHI-DEBUG] ${label} | oddsTotal=${total ?? 'NONE'} | matchAttempted=yes (abbrPair=${abbrPair}) | result=BAD_PRICE_DATA strike=${best.floor_strike} yes=${best.yes_bid_dollars} no=${best.no_bid_dollars}`);
@@ -1243,6 +1342,18 @@ async function getTodayGames(opts = {}) {
   const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team`;
   const [response, oddsMap] = await Promise.all([axios.get(url), getOdds()]);
   const games = response.data.dates[0]?.games || [];
+
+  // Count matchups so doubleheaders can be labeled "(Game N)" — without the
+  // suffix, game 2 collides with game 1 everywhere keyed by Date+Game name
+  // (pick dedup silently drops it, final-score grading is ambiguous).
+  const matchupCounts = {};
+  for (const g of games) {
+    const key = `${g.teams.away.team.name}|${g.teams.home.team.name}`;
+    matchupCounts[key] = (matchupCounts[key] || 0) + 1;
+  }
+  const isDoubleheaderGame = (g) =>
+    g.doubleHeader !== 'N' || matchupCounts[`${g.teams.away.team.name}|${g.teams.home.team.name}`] > 1;
+
   const kalshiPrices = await getKalshiMLBPrices(
     games.map(g => {
       const away = g.teams.away.team.name;
@@ -1253,6 +1364,8 @@ async function getTodayGames(opts = {}) {
         awayAbbr: g.teams.away.team.abbreviation,
         homeAbbr: g.teams.home.team.abbreviation,
         total: oddsMap[`${away}|${home}`]?.total,
+        gameNumber: g.gameNumber || 1,
+        isDoubleheader: isDoubleheaderGame(g),
       };
     }),
     today
@@ -1278,14 +1391,16 @@ async function getTodayGames(opts = {}) {
     const homePitcherId = game.teams.home.probablePitcher?.id;
     const awayPitcherId = game.teams.away.probablePitcher?.id;
     const coords = STADIUMS[venue];
+    const gameNumber = game.gameNumber || 1;
+    const gameLabel = `${away} @ ${home}${isDoubleheaderGame(game) ? ` (Game ${gameNumber})` : ''}`;
 
     const weather = coords?.outDirs !== undefined && coords.outDirs !== null
-      ? await getWeather(coords.lat, coords.lon)
+      ? await getWeather(coords.lat, coords.lon, game.gameDate)
       : null;
 
     const [awayStats, homeStats, awayHitters, homeHitters, awayBullpen, homeBullpen] = await Promise.all([
-      getPitcherStats(awayPitcher),
-      getPitcherStats(homePitcher),
+      getPitcherStats(awayPitcher, awayPitcherId),
+      getPitcherStats(homePitcher, homePitcherId),
       getTeamHitters(awayId),
       getTeamHitters(homeId),
       getBullpenStats(awayId, awayPitcherId),
@@ -1296,10 +1411,10 @@ async function getTodayGames(opts = {}) {
 
     const oddsKey = `${away}|${home}`;
     const odds = oddsMap[oddsKey];
-    const kalshi = kalshiPrices.get(oddsKey);
+    const kalshi = kalshiPrices.get(`${away}|${home}|${gameNumber}`);
     if (odds) gamesWithOdds++;
     if (kalshi) gamesWithKalshi++;
-    appendDaemonLog(`[KALSHI-DEBUG] ${away} @ ${home} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
+    appendDaemonLog(`[KALSHI-DEBUG] ${gameLabel} | oddsTotal=${odds ? odds.total : 'NONE'} | kalshiMatchFound=${kalshi ? 'yes' : 'no'}`);
     const stadiumNotes = STADIUM_NOTES[venue];
     const isOverLean = OVER_LEANS.includes(analysis.lean);
     const edge = detectEdge(analysis.lean, kalshi, venue);
@@ -1326,7 +1441,7 @@ async function getTodayGames(opts = {}) {
         || 'No single dominant signal — the call comes from several smaller factors combined.';
       const marketFact = marketSentence(kalshi, isOverLean);
       const riskFact = riskFactorFact(analysis.weighted, isOverLean, stadiumNotes, isDome, analysis.confidence);
-      logPick(today, `${away} @ ${home}`, analysis.lean, analysis.confidence, edge.label, loggableOdds, { signalFact, marketFact, riskFact });
+      logPick(today, gameLabel, analysis.lean, analysis.confidence, edge.label, loggableOdds, { signalFact, marketFact, riskFact });
     }
 
     if (explain) {
@@ -1338,7 +1453,7 @@ async function getTodayGames(opts = {}) {
     }
 
     const pf = stadiumNotes?.parkFactor;
-    const line1 = `${away} @ ${home} | ${venue} | Park Factor: ${pf != null ? pf.toFixed(2) : 'N/A'}`;
+    const line1 = `${gameLabel} | ${venue} | Park Factor: ${pf != null ? pf.toFixed(2) : 'N/A'}`;
     let line2 = null;
     let sportsbookLine = null;
     let kalshiLine = null;
@@ -1382,7 +1497,7 @@ async function getTodayGames(opts = {}) {
 
     console.log('---\n');
 
-    results.push({ game: `${away} @ ${home}`, lean: analysis.lean, odds, kalshi, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, sportsbookLine, kalshiLine, leaderboardSentence });
+    results.push({ game: gameLabel, lean: analysis.lean, odds, kalshi, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, sportsbookLine, kalshiLine, leaderboardSentence });
   }
 
   writeBotStatus({
@@ -1435,13 +1550,23 @@ async function getTodayGames(opts = {}) {
 // runs at fixed UTC times: full analysis at 11:00 and 17:00 UTC (7am/1pm ET),
 // and --update-results at 04:00 UTC (midnight ET).
 
-const LOGS_DIR = path.join(__dirname, 'logs');
+const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const DAEMON_LOG_PATH = path.join(LOGS_DIR, 'daemon.log');
 
 // Pushes picks_log.csv after the daemon's update-results run using the GitHub
 // Contents API, so it works even when git isn't available (e.g. Railway container).
 // Reads the current SHA, base64-encodes the file, and PUTs via GitHub API with
 // GITHUB_TOKEN. Failures are swallowed so they never take the daemon down.
+//
+// CRITICAL: skips the PUT when local content is byte-identical to what's
+// already on GitHub. Every push to main triggers a Railway redeploy, and a
+// redeploy rebuilds the container filesystem from the repo — wiping
+// scheduler_state.json (gitignored) so the catch-up scheduler refires
+// update-results, which called this function, which pushed a no-op commit,
+// which triggered another redeploy... an infinite deploy loop that produced
+// 350+ empty "auto: update picks log" commits in a single day. Comparing the
+// git blob SHA of local content against the remote SHA breaks that cycle:
+// a refire with unchanged content pushes nothing, so no redeploy follows.
 async function autoPushPicksLog() {
   const dateStr = new Date().toISOString().split('T')[0];
   const token = process.env.GITHUB_TOKEN;
@@ -1466,6 +1591,18 @@ async function autoPushPicksLog() {
 
     // Read the local file and base64-encode it.
     const content = fs.readFileSync(PICKS_LOG, 'utf8');
+
+    // Git blob SHA = sha1("blob <byteLength>\0<content>"). If it matches the
+    // remote file's SHA, the content is identical — push nothing.
+    const localBlobSha = crypto.createHash('sha1')
+      .update(`blob ${Buffer.byteLength(content)}\0`)
+      .update(content)
+      .digest('hex');
+    if (localBlobSha === sha) {
+      console.log('picks_log.csv unchanged from GitHub — skipping auto-push (no redeploy triggered)');
+      return;
+    }
+
     const encoded = Buffer.from(content).toString('base64');
 
     // Push the updated file via GitHub Contents API.
@@ -1690,7 +1827,12 @@ function runDaemon() {
         if (nowMinutes > scheduledMinutes) {
           appendDaemonLog(`Catch-up trigger: ${s.name} scheduled for ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')} UTC, running now at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} (process wasn't running at the scheduled time)`);
         }
-        runScheduledTask(s.name, s.task);
+        // Await so multiple due tasks (e.g. a catch-up firing update-results
+        // AND morning-analysis in one tick) run sequentially — both do
+        // read-modify-write on picks_log.csv and both patch console.log in
+        // runScheduledTask, so running them concurrently risks CSV corruption
+        // and nested console-patching restoring the wrong logger.
+        await runScheduledTask(s.name, s.task);
       }
     })().catch(err => appendDaemonLog(`Scheduler tick failed: ${err.message}`));
   }, 60000);
