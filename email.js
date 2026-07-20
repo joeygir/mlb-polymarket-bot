@@ -1,6 +1,13 @@
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns');
+
+// Railway (and some other cloud hosts) resolve smtp.gmail.com to an IPv6
+// address but don't actually route outbound IPv6 traffic, so the connection
+// fails with ENETUNREACH before it ever reaches Gmail. Preferring IPv4
+// resolution avoids that dead end entirely.
+dns.setDefaultResultOrder('ipv4first');
 
 const PICKS_LOG = path.join(__dirname, 'picks_log.csv');
 const BOT_STATUS_PATH = path.join(__dirname, 'bot_status.json');
@@ -481,9 +488,11 @@ function buildEmailText() {
 // one config.
 function buildGmailTransportConfigs(user, pass) {
   const timeouts = { connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 15000 };
+  // family: 4 forces IPv4 at the socket level too, in case anything bypasses
+  // the process-wide dns.setDefaultResultOrder('ipv4first') set above.
   return [
-    { label: 'port 465 (implicit TLS)', config: { host: 'smtp.gmail.com', port: 465, secure: true, auth: { user, pass }, ...timeouts } },
-    { label: 'port 587 (STARTTLS)', config: { host: 'smtp.gmail.com', port: 587, secure: false, auth: { user, pass }, ...timeouts } },
+    { label: 'port 465 (implicit TLS)', config: { host: 'smtp.gmail.com', port: 465, secure: true, family: 4, auth: { user, pass }, ...timeouts } },
+    { label: 'port 587 (STARTTLS)', config: { host: 'smtp.gmail.com', port: 587, secure: false, family: 4, auth: { user, pass }, ...timeouts } },
   ];
 }
 
