@@ -5,9 +5,32 @@ const dns = require('dns');
 
 // Railway (and some other cloud hosts) resolve smtp.gmail.com to an IPv6
 // address but don't actually route outbound IPv6 traffic, so the connection
-// fails with ENETUNREACH before it ever reaches Gmail. Preferring IPv4
-// resolution avoids that dead end entirely.
-dns.setDefaultResultOrder('ipv4first');
+// fails with ENETUNREACH before it ever reaches Gmail.
+//
+// dns.setDefaultResultOrder('ipv4first') does NOT fix this — it only affects
+// Node's built-in dns.lookup(), but nodemailer's SMTP client (smtp-connection)
+// does its own DNS resolution internally (explicitly queries A and AAAA
+// records itself, see node_modules/nodemailer/lib/shared/index.js
+// resolveHostname), bypassing dns.lookup() and that setting entirely. This
+// was confirmed live: the earlier fix still produced the identical
+// ENETUNREACH error on an IPv6 address. Likewise family: 4 in the transport
+// config does nothing — grepping nodemailer's source shows it's never read.
+//
+// The fix that actually works: resolve the IPv4 address ourselves and hand
+// nodemailer a literal IP as `host`. smtp-connection's resolveHostname()
+// short-circuits its own (dual-stack) resolution whenever host is already an
+// IP (net.isIP(options.host) is true), so IPv6 becomes structurally
+// impossible rather than just de-prioritized. tls.servername is set to the
+// real hostname so certificate validation still checks against
+// "smtp.gmail.com" despite connecting via its IP.
+async function resolveIPv4Host(hostname) {
+  try {
+    const addresses = await dns.promises.resolve4(hostname);
+    return addresses[0] || null;
+  } catch {
+    return null;
+  }
+}
 
 // Mirrors index.js: DATA_DIR points at a persistent volume when set (see the
 // DATA_DIR comment at the top of index.js), so the email reads the same
@@ -502,23 +525,37 @@ function buildEmailText() {
 // outbound SMTP — one port works, another times out, or a connection just
 // blips. Alternates between Gmail's two submission ports (465 implicit TLS,
 // 587 STARTTLS) across retries instead of failing after a single attempt on
-// one config.
+// one config. Each attempt re-resolves IPv4 fresh (Google rotates front-end
+// IPs) and builds its config just-in-time rather than upfront.
 function buildGmailTransportConfigs(user, pass) {
   const timeouts = { connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 15000 };
-  // family: 4 forces IPv4 at the socket level too, in case anything bypasses
-  // the process-wide dns.setDefaultResultOrder('ipv4first') set above.
-  return [
-    { label: 'port 465 (implicit TLS)', config: { host: 'smtp.gmail.com', port: 465, secure: true, family: 4, auth: { user, pass }, ...timeouts } },
-    { label: 'port 587 (STARTTLS)', config: { host: 'smtp.gmail.com', port: 587, secure: false, family: 4, auth: { user, pass }, ...timeouts } },
+  const ports = [
+    { label: 'port 465 (implicit TLS)', port: 465, secure: true },
+    { label: 'port 587 (STARTTLS)', port: 587, secure: false },
   ];
+  return ports.map(({ label, port, secure }) => ({
+    label,
+    buildConfig: async () => {
+      const ipv4Host = await resolveIPv4Host('smtp.gmail.com');
+      const host = ipv4Host || 'smtp.gmail.com'; // fall back to hostname if resolution itself fails
+      return {
+        host, port, secure, auth: { user, pass }, ...timeouts,
+        ...(ipv4Host ? { tls: { servername: 'smtp.gmail.com' } } : {}),
+        _resolvedIp: ipv4Host,
+      };
+    },
+  }));
 }
 
 async function sendMailWithRetry(transportOptions, mailOptions, maxAttempts = 3) {
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { label, config } = transportOptions[(attempt - 1) % transportOptions.length];
+    const { label, buildConfig } = transportOptions[(attempt - 1) % transportOptions.length];
     try {
-      console.log(`  Attempt ${attempt}/${maxAttempts} via ${label}...`);
+      const config = await buildConfig();
+      const ipNote = config._resolvedIp ? ` via ${config._resolvedIp}` : ' (IPv4 resolution failed, using hostname)';
+      console.log(`  Attempt ${attempt}/${maxAttempts} via ${label}${ipNote}...`);
+      delete config._resolvedIp;
       const transporter = nodemailer.createTransport(config);
       return await transporter.sendMail(mailOptions);
     } catch (err) {
