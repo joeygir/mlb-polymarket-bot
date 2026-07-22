@@ -16,18 +16,39 @@ const dns = require('dns');
 // ENETUNREACH error on an IPv6 address. Likewise family: 4 in the transport
 // config does nothing — grepping nodemailer's source shows it's never read.
 //
-// The fix that actually works: resolve the IPv4 address ourselves and hand
-// nodemailer a literal IP as `host`. smtp-connection's resolveHostname()
-// short-circuits its own (dual-stack) resolution whenever host is already an
-// IP (net.isIP(options.host) is true), so IPv6 becomes structurally
-// impossible rather than just de-prioritized. tls.servername is set to the
-// real hostname so certificate validation still checks against
-// "smtp.gmail.com" despite connecting via its IP.
+// The fix: resolve the IPv4 address ourselves and hand nodemailer a literal
+// IP as `host`. smtp-connection's resolveHostname() short-circuits its own
+// (dual-stack) resolution whenever host is already an IP (net.isIP(host) is
+// true), so IPv6 becomes structurally impossible rather than just
+// de-prioritized. tls.servername is set to the real hostname so certificate
+// validation still checks against "smtp.gmail.com" despite connecting via IP.
+//
+// IMPORTANT — how to do the resolving: use dns.lookup(), not dns.resolve4().
+// The first attempt at this fix used resolve4() and still failed live on
+// Railway with the identical ENETUNREACH error a few hours later — resolve4()
+// sends its own raw DNS query (via c-ares), bypassing whatever local resolver
+// path the container provides, and that path is evidently unreliable there
+// (it worked once, then failed). dns.lookup() instead asks the OS's normal
+// resolver (getaddrinfo) — the exact same mechanism every other network call
+// in this codebase (MLB, Kalshi, weather.gov) already uses successfully on
+// Railway every single run. { family: 4 } asks that same reliable path for
+// an IPv4-only result instead of picking through resolve4's separate,
+// flakier code path.
 async function resolveIPv4Host(hostname) {
   try {
-    const addresses = await dns.promises.resolve4(hostname);
-    return addresses[0] || null;
-  } catch {
+    const { address } = await dns.promises.lookup(hostname, { family: 4 });
+    return address;
+  } catch (lookupErr) {
+    // Second try, different resolution path — belt and suspenders after
+    // getting burned twice by assuming one method would always work.
+    try {
+      const addresses = await dns.promises.resolve4(hostname);
+      if (addresses[0]) return addresses[0];
+    } catch (resolveErr) {
+      console.error(`  IPv4 resolution failed via both dns.lookup (${lookupErr.message}) and dns.resolve4 (${resolveErr.message}) — falling back to hostname, which risks the IPv6 issue this exists to prevent.`);
+      return null;
+    }
+    console.error(`  dns.lookup failed (${lookupErr.message}), dns.resolve4 returned no addresses — falling back to hostname.`);
     return null;
   }
 }
