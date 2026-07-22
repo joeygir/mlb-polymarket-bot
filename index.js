@@ -5,6 +5,35 @@ const path = require('path');
 const crypto = require('crypto');
 const { sendEmailReport, testEmailReport } = require('./email');
 
+// MLB's schedule, Kalshi's ticker dates, and the whole notion of a "betting
+// day" (picks logged, results graded, today vs. yesterday) all follow the
+// US Eastern calendar day — not UTC midnight. UTC's calendar rolls over at
+// 8pm ET in summer (4pm ET in winter), so any code computing "today" from
+// raw UTC gets the wrong date for that ~4-hour gap every single night. This
+// caused a real incident: a restart landed at 9:34pm ET (already "tomorrow"
+// in UTC), so getTodayGames() looked for picks under the next day, found
+// none, and never considered the 6 real picks already logged under the
+// correct (but by-then "yesterday" per UTC) date. Every place that computes
+// "today"/"yesterday" for picks, schedules, or grading must go through this
+// so they all agree on which calendar day is actually in progress.
+function getEasternDateString(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date);
+}
+
+// Same reasoning as getEasternDateString, applied to day-of-week: the daemon
+// picks weekday/Saturday/Sunday schedules by day-of-week, and getUTCDay()
+// has the identical ~4-hour blind spot (e.g. Saturday 9pm ET already reads
+// as Sunday in UTC), which would pick the wrong day's schedule for anything
+// evaluated during that gap.
+const ET_WEEKDAY_TO_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+function getEasternDayOfWeek(date = new Date()) {
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(date);
+  return ET_WEEKDAY_TO_INDEX[weekday];
+}
+
 // Railway's container filesystem is rebuilt from the repo image on every
 // deploy, wiping anything written at runtime (logged picks, scheduler state,
 // bot status). Setting DATA_DIR to a mounted persistent volume (e.g. /data
@@ -768,7 +797,7 @@ async function getXERA(playerId) {
     // Cache per calendar day, not per year — the leaderboard updates daily,
     // and a long-lived daemon holding a year-keyed cache would serve xERA
     // values frozen at whenever the process started.
-    const day = new Date().toISOString().split('T')[0];
+    const day = getEasternDateString();
     if (!savantXeraTable || savantXeraTable.day !== day) {
       const url = `https://baseballsavant.mlb.com/leaderboard/custom?year=${year}&type=pitcher&filter=&sort=4&sortDir=asc&min=1&selections=p_game,p_formatted_ip,p_era,xera&chart=false&x=p_era&y=xera&r=no&toggledStat=&csv=true`;
       const res = await axios.get(url);
@@ -836,7 +865,7 @@ async function getTeamHitters(teamId, lineupPlayerIds) {
 const bullpenCache = new Map();
 
 async function getBullpenStats(teamId, starterPlayerId) {
-  const cacheKey = `${teamId}-${new Date().toISOString().split('T')[0]}`;
+  const cacheKey = `${teamId}-${getEasternDateString()}`;
   if (bullpenCache.has(cacheKey)) return bullpenCache.get(cacheKey);
 
   let result = { era: null, whip: null };
@@ -1591,7 +1620,7 @@ function printExplain({ away, home, venue, awayPitcher, homePitcher, awayStats, 
 
 async function getTodayGames(opts = {}) {
   const explain = !!opts.explain;
-  const today = new Date().toISOString().split('T')[0];
+  const today = getEasternDateString();
   const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,venue,team,lineups`;
   const [response, oddsMap] = await Promise.all([axios.get(url), getOdds()]);
   const games = response.data.dates[0]?.games || [];
@@ -1835,7 +1864,7 @@ const DAEMON_LOG_PATH = path.join(LOGS_DIR, 'daemon.log');
 // git blob SHA of local content against the remote SHA breaks that cycle:
 // a refire with unchanged content pushes nothing, so no redeploy follows.
 async function autoPushPicksLog() {
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = getEasternDateString();
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
     console.error('GITHUB_TOKEN not set — skipping auto-push');
@@ -2030,7 +2059,7 @@ function runDaemon() {
   appendDaemonLog(kalshiAuthOk ? 'Kalshi auth: OK' : 'Kalshi auth: FAILED - check KALSHI_PRIVATE_KEY env var');
 
   const now = new Date();
-  const dayOfWeek = now.getUTCDay();
+  const dayOfWeek = getEasternDayOfWeek(now);
   const dayName = getDayName(dayOfWeek);
   const schedule = getScheduleForDay(dayOfWeek);
 
@@ -2060,10 +2089,15 @@ function runDaemon() {
   setInterval(() => {
     (async () => {
       const now = new Date();
+      // hour/minute stay UTC — the schedule's fixed trigger times (16:00,
+      // 23:00, 04:00 UTC etc.) are UTC clock values by design, chosen to
+      // land on specific ET times. Only the calendar day and day-of-week
+      // (which decide which schedule variant applies, and which "date" a
+      // task belongs to) need the ET-aware versions.
       const hour = now.getUTCHours();
       const minute = now.getUTCMinutes();
-      const dayOfWeek = now.getUTCDay();
-      const dateStr = now.toISOString().split('T')[0];
+      const dayOfWeek = getEasternDayOfWeek(now);
+      const dateStr = getEasternDateString(now);
 
       if (dateStr !== lastCheckedDate) {
         triggeredKeys = loadSchedulerState(dateStr);

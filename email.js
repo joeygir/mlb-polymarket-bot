@@ -150,14 +150,26 @@ function parseCSV(content) {
   return { headers, rows };
 }
 
+// Mirrors index.js's getEasternDateString: MLB's schedule and picks_log.csv
+// dates follow the US Eastern calendar day, not UTC midnight. UTC's day
+// rolls over at 8pm ET in summer, so a raw UTC date computed anywhere in
+// that ~4-hour window is a full calendar day ahead of the actual baseball
+// day still in progress — this caused a live incident where an email sent
+// at 9:34pm ET looked for "today's" picks under the wrong (next) date and
+// found none, despite 6 real picks being logged under the correct date.
+function getEasternDateString(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date);
+}
+
 function getYesterdayString() {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return d.toISOString().split('T')[0];
+  return getEasternDateString(new Date(Date.now() - 24 * 60 * 60 * 1000));
 }
 
 function getTodayString() {
-  return new Date().toISOString().split('T')[0];
+  return getEasternDateString();
 }
 
 function getYesterdaysResults() {
