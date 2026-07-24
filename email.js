@@ -1,57 +1,5 @@
-const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
-const dns = require('dns');
-
-// Railway (and some other cloud hosts) resolve smtp.gmail.com to an IPv6
-// address but don't actually route outbound IPv6 traffic, so the connection
-// fails with ENETUNREACH before it ever reaches Gmail.
-//
-// dns.setDefaultResultOrder('ipv4first') does NOT fix this — it only affects
-// Node's built-in dns.lookup(), but nodemailer's SMTP client (smtp-connection)
-// does its own DNS resolution internally (explicitly queries A and AAAA
-// records itself, see node_modules/nodemailer/lib/shared/index.js
-// resolveHostname), bypassing dns.lookup() and that setting entirely. This
-// was confirmed live: the earlier fix still produced the identical
-// ENETUNREACH error on an IPv6 address. Likewise family: 4 in the transport
-// config does nothing — grepping nodemailer's source shows it's never read.
-//
-// The fix: resolve the IPv4 address ourselves and hand nodemailer a literal
-// IP as `host`. smtp-connection's resolveHostname() short-circuits its own
-// (dual-stack) resolution whenever host is already an IP (net.isIP(host) is
-// true), so IPv6 becomes structurally impossible rather than just
-// de-prioritized. tls.servername is set to the real hostname so certificate
-// validation still checks against "smtp.gmail.com" despite connecting via IP.
-//
-// IMPORTANT — how to do the resolving: use dns.lookup(), not dns.resolve4().
-// The first attempt at this fix used resolve4() and still failed live on
-// Railway with the identical ENETUNREACH error a few hours later — resolve4()
-// sends its own raw DNS query (via c-ares), bypassing whatever local resolver
-// path the container provides, and that path is evidently unreliable there
-// (it worked once, then failed). dns.lookup() instead asks the OS's normal
-// resolver (getaddrinfo) — the exact same mechanism every other network call
-// in this codebase (MLB, Kalshi, weather.gov) already uses successfully on
-// Railway every single run. { family: 4 } asks that same reliable path for
-// an IPv4-only result instead of picking through resolve4's separate,
-// flakier code path.
-async function resolveIPv4Host(hostname) {
-  try {
-    const { address } = await dns.promises.lookup(hostname, { family: 4 });
-    return address;
-  } catch (lookupErr) {
-    // Second try, different resolution path — belt and suspenders after
-    // getting burned twice by assuming one method would always work.
-    try {
-      const addresses = await dns.promises.resolve4(hostname);
-      if (addresses[0]) return addresses[0];
-    } catch (resolveErr) {
-      console.error(`  IPv4 resolution failed via both dns.lookup (${lookupErr.message}) and dns.resolve4 (${resolveErr.message}) — falling back to hostname, which risks the IPv6 issue this exists to prevent.`);
-      return null;
-    }
-    console.error(`  dns.lookup failed (${lookupErr.message}), dns.resolve4 returned no addresses — falling back to hostname.`);
-    return null;
-  }
-}
 
 // Mirrors index.js: DATA_DIR points at a persistent volume when set (see the
 // DATA_DIR comment at the top of index.js), so the email reads the same
@@ -554,62 +502,68 @@ function buildEmailText() {
   return lines.join('\n');
 }
 
-// Cloud hosts (Railway included) sometimes have flaky or partially-blocked
-// outbound SMTP — one port works, another times out, or a connection just
-// blips. Alternates between Gmail's two submission ports (465 implicit TLS,
-// 587 STARTTLS) across retries instead of failing after a single attempt on
-// one config. Each attempt re-resolves IPv4 fresh (Google rotates front-end
-// IPs) and builds its config just-in-time rather than upfront.
-function buildGmailTransportConfigs(user, pass) {
-  const timeouts = { connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 15000 };
-  const ports = [
-    { label: 'port 465 (implicit TLS)', port: 465, secure: true },
-    { label: 'port 587 (STARTTLS)', port: 587, secure: false },
-  ];
-  return ports.map(({ label, port, secure }) => ({
-    label,
-    buildConfig: async () => {
-      const ipv4Host = await resolveIPv4Host('smtp.gmail.com');
-      const host = ipv4Host || 'smtp.gmail.com'; // fall back to hostname if resolution itself fails
-      return {
-        host, port, secure, auth: { user, pass }, ...timeouts,
-        ...(ipv4Host ? { tls: { servername: 'smtp.gmail.com' } } : {}),
-        _resolvedIp: ipv4Host,
-      };
-    },
-  }));
-}
+// Sends via Resend's HTTP API instead of raw SMTP — a plain authenticated
+// HTTPS POST, the exact same mechanism every other network call in this bot
+// (MLB, Kalshi, weather.gov) already uses reliably on Railway every single
+// run. This replaces nodemailer/Gmail SMTP entirely after repeated live
+// failures there (connection timeouts, then an IPv6 routing dead end that
+// survived two separate fix attempts) — the failure mode was the transport
+// itself, not any one bug in it.
+//
+// Resend restricts un-verified accounts (no custom domain added at
+// resend.com/domains) to sending only to the account's own registered email
+// — confirmed live: a real send to 2 recipients came back
+// "You can only send testing emails to your own email address (X)". Rather
+// than hard-code that single address, the first attempt always targets the
+// full configured EMAIL_TO list; if Resend rejects it with that specific
+// message, the allowed address is parsed straight out of Resend's own error
+// text and used for a fallback send. Once a domain is verified, the first
+// attempt just succeeds and this fallback never triggers again — no code
+// change needed then.
+const RESEND_RESTRICTED_RE = /You can only send testing emails to your own email address \(([^)]+)\)/;
 
-async function sendMailWithRetry(transportOptions, mailOptions, maxAttempts = 3) {
-  let lastErr;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { label, buildConfig } = transportOptions[(attempt - 1) % transportOptions.length];
-    try {
-      const config = await buildConfig();
-      const ipNote = config._resolvedIp ? ` via ${config._resolvedIp}` : ' (IPv4 resolution failed, using hostname)';
-      console.log(`  Attempt ${attempt}/${maxAttempts} via ${label}${ipNote}...`);
-      delete config._resolvedIp;
-      const transporter = nodemailer.createTransport(config);
-      return await transporter.sendMail(mailOptions);
-    } catch (err) {
-      lastErr = err;
-      console.error(`  Attempt ${attempt}/${maxAttempts} (${label}) failed: ${err.message}`);
-      if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 4000 * attempt));
+async function sendViaResend({ from, to, subject, html, text }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) throw new Error('RESEND_API_KEY not set');
+
+  const post = async (toList) => {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: toList, subject, html, text }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  };
+
+  const fullList = to.split(',').map(e => e.trim()).filter(Boolean);
+  console.log(`  Sending via Resend API to ${fullList.join(', ')}...`);
+  let result = await post(fullList);
+
+  if (!result.ok) {
+    const restricted = RESEND_RESTRICTED_RE.exec(result.data?.message || '');
+    if (restricted && fullList.length > 1) {
+      const ownEmail = restricted[1];
+      console.log(`  Resend account isn't domain-verified yet — falling back to ${ownEmail} only (${fullList.length - 1} other recipient(s) won't get this one). Verify a domain at resend.com/domains to unlock everyone on EMAIL_TO.`);
+      result = await post([ownEmail]);
     }
   }
-  throw lastErr;
+
+  if (!result.ok) {
+    throw new Error(result.data?.message || `Resend API error (HTTP ${result.status})`);
+  }
+  return result.data;
 }
 
 async function sendEmailReport(opts = {}) {
   const forceTest = opts.forceTest || false;
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASS;
+  const apiKey = process.env.RESEND_API_KEY;
   const to = process.env.EMAIL_TO;
+  const from = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
 
-  if (!user || !pass || !to) {
-    console.log('Email credentials not configured — skipping email report');
-    console.log(`  EMAIL_USER: ${user ? '✓' : '✗'}`);
-    console.log(`  EMAIL_PASS: ${pass ? '✓' : '✗'}`);
+  if (!apiKey || !to) {
+    console.log('Email not configured — skipping email report');
+    console.log(`  RESEND_API_KEY: ${apiKey ? '✓' : '✗'}`);
     console.log(`  EMAIL_TO: ${to ? '✓' : '✗'}`);
     return;
   }
@@ -623,18 +577,15 @@ async function sendEmailReport(opts = {}) {
   // confirm the bot ran and to see yesterday's summary and health status.
   console.log(`Preparing email with ${todayPicks.length} picks for ${to}...`);
 
-  const transportOptions = buildGmailTransportConfigs(user, pass);
   const { subject, html } = buildEmailHTML();
   const text = buildEmailText();
 
   try {
-    console.log(`Connecting to Gmail SMTP...`);
-    const info = await sendMailWithRetry(transportOptions, { from: user, to, subject, text, html });
-    console.log(`✓ Email sent successfully to ${to}`);
-    console.log(`  Message ID: ${info.messageId}`);
+    const info = await sendViaResend({ from, to, subject, html, text });
+    console.log(`✓ Email sent successfully via Resend`);
+    console.log(`  Message ID: ${info.id}`);
   } catch (err) {
-    console.error(`✗ Failed to send email after all retries: ${err.message}`);
-    if (err.response) console.error(`  Response: ${err.response}`);
+    console.error(`✗ Failed to send email: ${err.message}`);
   }
 }
 
