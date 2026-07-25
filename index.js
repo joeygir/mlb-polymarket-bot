@@ -1663,6 +1663,18 @@ async function getTodayGames(opts = {}) {
   let gamesWithKalshi = 0;
 
   for (const game of games) {
+    // A single game throwing partway through (bad/malformed data from any of
+    // the several APIs this loop touches) used to abort the ENTIRE day's
+    // run — every game after it in iteration order never got analyzed, and
+    // writeBotStatus() below the loop never ran, since both live after this
+    // point in the same function. That silently froze bot_status.json for
+    // days (confirmed live: stuck reporting a run from several days earlier
+    // while picks kept logging fine day to day — proof some games succeeded
+    // before hitting whichever one broke, then the rest of that day, and the
+    // status write, never happened). One bad game must not take down the
+    // rest of the slate.
+    const safeLabel = `${game.teams?.away?.team?.name || 'unknown'} @ ${game.teams?.home?.team?.name || 'unknown'}`;
+    try {
     const home = game.teams.home.team.name;
     const away = game.teams.away.team.name;
     const homeId = game.teams.home.team.id;
@@ -1794,6 +1806,10 @@ async function getTodayGames(opts = {}) {
     console.log('---\n');
 
     results.push({ game: gameLabel, lean: analysis.lean, odds, kalshi, score: analysis.score, confidence: analysis.confidence, edge, line1, line2, sportsbookLine, kalshiLine, leaderboardSentence });
+    } catch (err) {
+      console.error(`✗ Error processing ${safeLabel}: ${err.message} — skipping this game, continuing with the rest of today's slate.`);
+      appendDaemonLog(`Game processing failed for ${safeLabel}: ${err.message}`);
+    }
   }
 
   writeBotStatus({
