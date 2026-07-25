@@ -569,8 +569,17 @@ const KALSHI_FEE_RATE = 0.07;
 function kalshiFee(price) { return KALSHI_FEE_RATE * price * (1 - price); }
 
 // Minimum probability edge (our P minus fee-adjusted cost) per label.
+// EDGE_TARGET raised from 0.05 to match EDGE_PRIME_TARGET (2026-07-26): at
+// 62 resolved picks, the 5%+ TARGET tier was 16/35 (45.7%, -$39.88) while
+// the 8%+ PRIME TARGET tier was 14/25 (56.0%, +$67.40) — the lower bar was
+// net-negative. Rather than guess an intermediate value with zero data
+// behind it, this pauses the TARGET tier at the one threshold that's
+// actually evidenced to work, until the 200-pick recalibration can properly
+// re-derive it. TARGET effectively can't fire while these are equal (the
+// PRIME check runs first and catches everything >= this value) — left as a
+// separate constant, not removed, so it's a one-line revert.
 const EDGE_PRIME_TARGET = 0.08;
-const EDGE_TARGET = 0.05;
+const EDGE_TARGET = 0.08;
 const EDGE_CONSIDER = 0.02;
 
 // Standard normal CDF (Abramowitz–Stegun erf approximation, |err| < 1.5e-7).
