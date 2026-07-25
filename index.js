@@ -108,6 +108,37 @@ function saveSchedulerState(dateStr, triggeredKeys) {
   }
 }
 
+// Records the last ET date a daily email actually went out (confirmed by
+// Resend accepting it), so the daemon's failsafe can tell "analysis ran but
+// no email reached anyone today" apart from "all good" — and keep retrying
+// the send until one succeeds instead of staying silent until tomorrow.
+const EMAIL_LEDGER_PATH = path.join(DATA_DIR, 'email_ledger.json');
+
+function loadEmailLedger() {
+  try {
+    if (!fs.existsSync(EMAIL_LEDGER_PATH)) return { sentDate: null };
+    return JSON.parse(fs.readFileSync(EMAIL_LEDGER_PATH, 'utf8'));
+  } catch {
+    return { sentDate: null };
+  }
+}
+
+function recordEmailSent(dateStr) {
+  try {
+    fs.writeFileSync(EMAIL_LEDGER_PATH, JSON.stringify({ sentDate: dateStr }));
+  } catch (err) {
+    console.error(`Failed to write email_ledger.json: ${err.message}`);
+  }
+}
+
+// Shared by the scheduled tasks and the failsafe: send the report, and record
+// the success in the ledger so the failsafe knows today is covered.
+async function sendEmailAndRecord() {
+  const ok = await sendEmailReport();
+  if (ok) recordEmailSent(getEasternDateString());
+  return ok;
+}
+
 const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
 const REGRESSION_MILESTONE_TARGET = 200;
 
@@ -1952,7 +1983,7 @@ async function autoPushPicksLog() {
 // Sundays: 14:00 UTC (10am ET), 15:30 UTC (11:30am ET), 04:00 UTC (midnight ET)
 function getScheduleForDay(dayOfWeek) {
   const updateTask = async () => { await updateResults(); await autoPushPicksLog(); };
-  const analysisWithEmail = async () => { await getTodayGames(); await sendEmailReport(); };
+  const analysisWithEmail = async () => { await getTodayGames(); await sendEmailAndRecord(); };
 
   if (dayOfWeek === 0) {
     // Sunday
@@ -2101,6 +2132,7 @@ function runDaemon() {
   let triggeredKeys = new Set();
   let lastCheckedDate = null;
   let lastLoggedAdjustmentDate = null;
+  let lastEmailRetryAt = 0;
 
   setInterval(() => {
     (async () => {
@@ -2150,6 +2182,20 @@ function runDaemon() {
         // runScheduledTask, so running them concurrently risks CSV corruption
         // and nested console-patching restoring the wrong logger.
         await runScheduledTask(s.name, s.task);
+      }
+
+      // Email failsafe: if an analysis task already ran today but no email
+      // has been confirmed sent today (send failed, or the process died
+      // between analysis and send), retry every 30 minutes until one lands.
+      // A whole week of "no email again" incidents traces to exactly this
+      // gap — a failed or skipped send simply stayed failed until the next
+      // scheduled run, sometimes a full day later.
+      const analysisRanToday = triggeredKeys.has(`${dateStr}-morning-analysis`) || triggeredKeys.has(`${dateStr}-pregame-analysis`);
+      if (analysisRanToday && loadEmailLedger().sentDate !== dateStr && Date.now() - lastEmailRetryAt >= 30 * 60 * 1000) {
+        lastEmailRetryAt = Date.now();
+        appendDaemonLog('Email failsafe: analysis ran today but no successful email recorded — retrying send.');
+        console.log('Email failsafe: retrying today\'s email...');
+        await sendEmailAndRecord();
       }
     })().catch(err => appendDaemonLog(`Scheduler tick failed: ${err.message}`));
   }, 60000);

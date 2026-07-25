@@ -8,6 +8,7 @@ logs/
 data/
 bot_status.json
 scheduler_state.json
+email_ledger.json
 __pycache__/
 *.pyc
 .DS_Store

@@ -565,7 +565,7 @@ async function sendEmailReport(opts = {}) {
     console.log('Email not configured — skipping email report');
     console.log(`  RESEND_API_KEY: ${apiKey ? '✓' : '✗'}`);
     console.log(`  EMAIL_TO: ${to ? '✓' : '✗'}`);
-    return;
+    return false;
   }
 
   const todayPicks = getTodaysPicks();
@@ -580,12 +580,16 @@ async function sendEmailReport(opts = {}) {
   const { subject, html } = buildEmailHTML();
   const text = buildEmailText();
 
+  // Returns true only on a confirmed successful send — the daemon's email
+  // failsafe uses this to decide whether today still needs a retry.
   try {
     const info = await sendViaResend({ from, to, subject, html, text });
     console.log(`✓ Email sent successfully via Resend`);
     console.log(`  Message ID: ${info.id}`);
+    return true;
   } catch (err) {
     console.error(`✗ Failed to send email: ${err.message}`);
+    return false;
   }
 }
 
