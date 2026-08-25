@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { sendEmailReport, testEmailReport } = require('./email');
+const { sendEmailReport, sendAlertEmail, testEmailReport } = require('./email');
 
 // MLB's schedule, Kalshi's ticker dates, and the whole notion of a "betting
 // day" (picks logged, results graded, today vs. yesterday) all follow the
@@ -137,6 +137,37 @@ async function sendEmailAndRecord() {
   const ok = await sendEmailReport();
   if (ok) recordEmailSent(getEasternDateString());
   return ok;
+}
+
+// Mirrors EMAIL_LEDGER_PATH above: tracks the last ET date autoPushPicksLog()
+// confirmed the sync was healthy (either it pushed, or it found nothing new
+// to push), so the daemon's push failsafe can tell "today's sync is covered"
+// apart from "grading ran but the push silently failed" — the gap that let
+// GitHub sync go dark for a month (2026-07-25 to 2026-08-25) with no alert.
+const PUSH_LEDGER_PATH = path.join(DATA_DIR, 'push_ledger.json');
+
+function loadPushLedger() {
+  try {
+    if (!fs.existsSync(PUSH_LEDGER_PATH)) return { confirmedDate: null };
+    return JSON.parse(fs.readFileSync(PUSH_LEDGER_PATH, 'utf8'));
+  } catch {
+    return { confirmedDate: null };
+  }
+}
+
+function recordPushConfirmed(dateStr) {
+  try {
+    fs.writeFileSync(PUSH_LEDGER_PATH, JSON.stringify({ confirmedDate: dateStr }));
+  } catch (err) {
+    console.error(`Failed to write push_ledger.json: ${err.message}`);
+  }
+}
+
+// Days between two "YYYY-MM-DD" ET date strings (positive if `to` is later).
+function daysBetweenDateStrings(from, to) {
+  if (!from) return null;
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / msPerDay);
 }
 
 const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
@@ -1919,12 +1950,28 @@ const DAEMON_LOG_PATH = path.join(LOGS_DIR, 'daemon.log');
 // 350+ empty "auto: update picks log" commits in a single day. Comparing the
 // git blob SHA of local content against the remote SHA breaks that cycle:
 // a refire with unchanged content pushes nothing, so no redeploy follows.
+// On any failure branch this alerts immediately by email (instead of only
+// console.error, which nobody was watching) and leaves the push ledger
+// unrecorded so the daemon's failsafe below keeps retrying every 30 min.
+async function alertPushFailure(dateStr, reason) {
+  const lastGood = loadPushLedger().confirmedDate;
+  const staleDays = daysBetweenDateStrings(lastGood, dateStr);
+  const staleNote = lastGood
+    ? `Last confirmed sync: ${lastGood} (${staleDays} day${staleDays === 1 ? '' : 's'} ago).`
+    : 'No confirmed sync recorded yet.';
+  console.error(`Auto-push failed [${dateStr}]: ${reason}`);
+  await sendAlertEmail(
+    `MLB Bot ALERT: GitHub auto-push failed${staleDays >= 2 ? ` (${staleDays}d unsynced)` : ''}`,
+    `autoPushPicksLog() failed on ${dateStr}: ${reason}\n\n${staleNote}\n\nRailway keeps grading picks locally, but nothing since the last confirmed sync has been written back to GitHub — a redeploy before this is fixed would lose that data.`
+  );
+}
+
 async function autoPushPicksLog() {
   const dateStr = getEasternDateString();
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
-    console.error('GITHUB_TOKEN not set — skipping auto-push');
-    return;
+    await alertPushFailure(dateStr, 'GITHUB_TOKEN not set');
+    return false;
   }
 
   try {
@@ -1935,8 +1982,8 @@ async function autoPushPicksLog() {
     );
 
     if (!getRes.ok) {
-      console.error(`Failed to fetch current SHA: ${getRes.status}`);
-      return;
+      await alertPushFailure(dateStr, `Failed to fetch current SHA (HTTP ${getRes.status})`);
+      return false;
     }
 
     const { sha } = await getRes.json();
@@ -1952,7 +1999,8 @@ async function autoPushPicksLog() {
       .digest('hex');
     if (localBlobSha === sha) {
       console.log('picks_log.csv unchanged from GitHub — skipping auto-push (no redeploy triggered)');
-      return;
+      recordPushConfirmed(dateStr);
+      return true;
     }
 
     const encoded = Buffer.from(content).toString('base64');
@@ -1976,13 +2024,17 @@ async function autoPushPicksLog() {
     );
 
     if (!putRes.ok) {
-      console.error(`Failed to push to GitHub: ${putRes.status}`);
-      return;
+      const body = await putRes.json().catch(() => ({}));
+      await alertPushFailure(dateStr, `Failed to push to GitHub (HTTP ${putRes.status})${body.message ? `: ${body.message}` : ''}`);
+      return false;
     }
 
     console.log('Auto-committed and pushed picks_log.csv via GitHub API');
+    recordPushConfirmed(dateStr);
+    return true;
   } catch (err) {
-    console.error('Auto-push failed:', err.message);
+    await alertPushFailure(dateStr, err.message);
+    return false;
   }
 }
 
@@ -2142,6 +2194,7 @@ function runDaemon() {
   let lastCheckedDate = null;
   let lastLoggedAdjustmentDate = null;
   let lastEmailRetryAt = 0;
+  let lastPushRetryAt = 0;
 
   setInterval(() => {
     (async () => {
@@ -2205,6 +2258,19 @@ function runDaemon() {
         appendDaemonLog('Email failsafe: analysis ran today but no successful email recorded — retrying send.');
         console.log('Email failsafe: retrying today\'s email...');
         await sendEmailAndRecord();
+      }
+
+      // GitHub push failsafe: same shape as the email failsafe above. Grading
+      // (update-results) already ran autoPushPicksLog() once tonight as part
+      // of updateTask — if that push wasn't confirmed (see PUSH_LEDGER_PATH),
+      // retry every 30 minutes instead of waiting for tomorrow's run, which
+      // is exactly the gap that let a broken sync go unnoticed for a month.
+      const gradingRanToday = triggeredKeys.has(`${dateStr}-update-results`);
+      if (gradingRanToday && loadPushLedger().confirmedDate !== dateStr && Date.now() - lastPushRetryAt >= 30 * 60 * 1000) {
+        lastPushRetryAt = Date.now();
+        appendDaemonLog('Push failsafe: grading ran today but no confirmed GitHub sync recorded — retrying push.');
+        console.log('Push failsafe: retrying today\'s auto-push...');
+        await autoPushPicksLog();
       }
     })().catch(err => appendDaemonLog(`Scheduler tick failed: ${err.message}`));
   }, 60000);

@@ -555,6 +555,29 @@ async function sendViaResend({ from, to, subject, html, text }) {
   return result.data;
 }
 
+// For urgent operational alerts (e.g. GitHub auto-push failing) that need to
+// reach Joey the same night rather than waiting to be noticed in logs. Plain
+// text, reuses the same Resend path/fallback as the daily report.
+async function sendAlertEmail(subject, text) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const to = process.env.EMAIL_TO;
+  const from = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+
+  if (!apiKey || !to) {
+    console.log('Email not configured — skipping alert email');
+    return false;
+  }
+
+  try {
+    await sendViaResend({ from, to, subject, html: `<pre>${text}</pre>`, text });
+    console.log(`✓ Alert email sent: ${subject}`);
+    return true;
+  } catch (err) {
+    console.error(`✗ Failed to send alert email: ${err.message}`);
+    return false;
+  }
+}
+
 async function sendEmailReport(opts = {}) {
   const forceTest = opts.forceTest || false;
   const apiKey = process.env.RESEND_API_KEY;
@@ -595,5 +618,6 @@ async function sendEmailReport(opts = {}) {
 
 module.exports = {
   sendEmailReport,
+  sendAlertEmail,
   testEmailReport: () => sendEmailReport({ forceTest: true })
 };
