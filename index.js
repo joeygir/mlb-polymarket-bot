@@ -70,6 +70,42 @@ if (DATA_DIR !== __dirname && !fs.existsSync(PICKS_LOG) && fs.existsSync(path.jo
   console.log(`Seeded ${PICKS_LOG} from repo copy`);
 }
 
+// Full-slate evaluation log: one row per analyzed game per day, picked or
+// not. This exists because the 2026-08-25 recalibration could only be fit
+// on games the old bot chose to bet — a selection-biased sample that made
+// factor-level questions (is the park factor right? is OPS_RUN_ELASTICITY
+// right?) unanswerable. With every game's projection components + market
+// prices logged daily, the 350-pick review can calibrate the projection
+// against actual totals across ~450 games/month instead. Grows on the
+// container (or the DATA_DIR volume if attached); it is NOT auto-pushed to
+// GitHub — pushing a file that changes every morning would trigger a
+// redeploy loop the picks-log SHA guard exists to prevent. Pull it via the
+// Railway Console when recalibration time comes.
+const EVAL_LOG = path.join(DATA_DIR, 'eval_log.csv');
+const EVAL_HEADERS = ['Date','Game','Venue','Park_Factor','Away_RA','Home_RA','Away_Off','Home_Off','Weather_Factor','Model_Total','Model_SD','Market_Center','Best_Side','Best_Strike','Best_Cost','Raw_Model_Prob','Blended_Prob','Edge','Label','Picked'];
+
+// First-write-wins per date: a catch-up refire after a redeploy re-analyzes
+// the same day with slightly moved prices/weather; appending again would
+// duplicate the slate. If today's rows exist, keep the originals.
+function logEvalRecords(dateStr, records) {
+  if (!records.length) return;
+  try {
+    if (fs.existsSync(EVAL_LOG)) {
+      const existing = fs.readFileSync(EVAL_LOG, 'utf8');
+      if (existing.split('\n').some(l => l.startsWith(dateStr + ','))) {
+        console.log(`eval_log.csv already has rows for ${dateStr} — keeping the originals`);
+        return;
+      }
+      fs.appendFileSync(EVAL_LOG, records.map(r => rowToCSV(r, EVAL_HEADERS)).join('\n') + '\n');
+    } else {
+      fs.writeFileSync(EVAL_LOG, EVAL_HEADERS.join(',') + '\n' + records.map(r => rowToCSV(r, EVAL_HEADERS)).join('\n') + '\n');
+    }
+    console.log(`Logged ${records.length} game evaluations to eval_log.csv`);
+  } catch (err) {
+    console.error(`Failed to write eval_log.csv: ${err.message}`);
+  }
+}
+
 // Self-check snapshot written at the end of every getTodayGames() run so
 // the email can report whether the bot actually ran today and whether its
 // data sources (Odds API, Kalshi) looked healthy — not committed to git,
@@ -726,7 +762,14 @@ function projectGameTotal({ awayStats, homeStats, awayBullpen, homeBullpen, away
   const projectedTotal = (homeRunsAllowed * awayOffense + awayRunsAllowed * homeOffense) * pf * wx;
   const sd = TOTAL_RUNS_SD_COEFF * Math.sqrt(projectedTotal);
 
-  return { projectedTotal, sd, missing: quality.missing };
+  // components are logged per-game to eval_log.csv so the next recalibration
+  // can fit the factor weights (park, OPS elasticity, pitching inputs)
+  // against actual totals across FULL slates — the 2026-08-25 recalibration
+  // was limited to picked games only, which is a selection-biased sample.
+  return {
+    projectedTotal, sd, missing: quality.missing,
+    components: { awayRunsAllowed, homeRunsAllowed, awayOffense, homeOffense, parkFactor: pf, weatherFactor: wx },
+  };
 }
 
 // P(total > strike) under the normal model. Strikes are X.5 so no push case.
@@ -788,7 +831,7 @@ function detectProbEdge(projection, kalshiStrikes) {
       const effectiveCost = c.cost + kalshiFee(c.cost);
       const edge = blendedProb - effectiveCost;
       if (!best || edge > best.edge) {
-        best = { side: c.side, strike: s.strike, ticker: s.ticker, cost: c.cost, effectiveCost, ourProb: blendedProb, rawModelProb: c.modelProb, edge };
+        best = { side: c.side, strike: s.strike, ticker: s.ticker, cost: c.cost, effectiveCost, ourProb: blendedProb, rawModelProb: c.modelProb, edge, marketCenter };
       }
     }
   }
@@ -1759,6 +1802,7 @@ async function getTodayGames(opts = {}) {
 
   const results = [];
   const pendingPicks = [];
+  const evalRecords = [];
   let gamesWithOdds = 0;
   let gamesWithKalshi = 0;
 
@@ -1822,6 +1866,27 @@ async function getTodayGames(opts = {}) {
     const projection = analysis.lean === 'AVOID' ? null
       : projectGameTotal({ awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, stadiumNotes, weather, coords, venue, isDome });
     const edge = analysis.lean === 'AVOID' ? null : detectProbEdge(projection, kalshi?.strikes);
+
+    // Every projected game goes into the eval log (picked or not) — Label
+    // and Picked are finalized after the daily cap resolves below.
+    if (projection) {
+      const c = projection.components;
+      evalRecords.push({
+        _edge: edge,
+        Date: today, Game: gameLabel, Venue: venue,
+        Park_Factor: c.parkFactor.toFixed(3),
+        Away_RA: c.awayRunsAllowed.toFixed(3), Home_RA: c.homeRunsAllowed.toFixed(3),
+        Away_Off: c.awayOffense.toFixed(3), Home_Off: c.homeOffense.toFixed(3),
+        Weather_Factor: c.weatherFactor.toFixed(3),
+        Model_Total: projection.projectedTotal.toFixed(2), Model_SD: projection.sd.toFixed(2),
+        Market_Center: edge?.marketCenter ?? '',
+        Best_Side: edge?.side ?? '', Best_Strike: edge?.strike ?? '',
+        Best_Cost: edge?.cost != null ? edge.cost.toFixed(2) : '',
+        Raw_Model_Prob: edge?.rawModelProb != null ? edge.rawModelProb.toFixed(4) : '',
+        Blended_Prob: edge?.ourProb != null ? edge.ourProb.toFixed(4) : '',
+        Edge: edge?.edge != null ? edge.edge.toFixed(4) : '',
+      });
+    }
 
     const isOverLean = edge?.side ? edge.side === 'OVER' : OVER_LEANS.includes(analysis.lean);
 
@@ -1934,6 +1999,19 @@ async function getTodayGames(opts = {}) {
   const chosenPicks = pendingPicks.slice(0, MAX_PICKS_PER_DAY);
   if (cappedOut.length) {
     console.log(`Daily cap: kept top ${chosenPicks.length} of ${pendingPicks.length} qualifying edges — ${cappedOut.map(p => p.gameLabel).join(', ')} demoted to CONSIDER.\n`);
+  }
+
+  // Finalize and write the full-slate eval log (post-cap labels). Explain
+  // mode skips it: a manual midday --explain run would freeze the day's
+  // rows before the scheduled morning analysis writes the real ones.
+  if (!explain) {
+    const chosenLabels = new Set(chosenPicks.map(p => p.gameLabel));
+    for (const r of evalRecords) {
+      r.Label = r._edge?.label ?? 'NO MARKET';
+      r.Picked = chosenLabels.has(r.Game) ? 'YES' : '';
+      delete r._edge;
+    }
+    logEvalRecords(today, evalRecords);
   }
 
   // Log the winners (in explain mode too — matches the old behavior, where

@@ -13,3 +13,4 @@ push_ledger.json
 __pycache__/
 *.pyc
 .DS_Store
+eval_log.csv
