@@ -39,9 +39,6 @@ function getBotHealthStatus() {
   if (status.kalshiAuthOk === false) {
     warnings.push('Kalshi authentication FAILED — check the KALSHI_PRIVATE_KEY env var.');
   }
-  if (status.gamesTotal > 0 && status.gamesWithOdds === 0) {
-    warnings.push(`Odds API returned no data for any of today's ${status.gamesTotal} games.`);
-  }
   if (status.gamesTotal > 0 && status.gamesWithKalshi === 0) {
     warnings.push(`Kalshi returned no matching markets for any of today's ${status.gamesTotal} games.`);
   }
