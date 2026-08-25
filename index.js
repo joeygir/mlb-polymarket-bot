@@ -170,11 +170,11 @@ function daysBetweenDateStrings(from, to) {
   return Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / msPerDay);
 }
 
-const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
-const REGRESSION_MILESTONE_TARGET = 200;
+const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Recalibrated 2026-08-25 at 216 resolved picks: model probability now blended 25/75 with the Kalshi ask, max 2 picks/day, tightened cost and disagreement guards. The goal is validating the new formula live — not pick volume.';
+const REGRESSION_MILESTONE_TARGET = 350;
 
 function regressionMilestoneLine(resolvedCount) {
-  return `Regression milestone: ${resolvedCount}/${REGRESSION_MILESTONE_TARGET} resolved picks logged. At ${REGRESSION_MILESTONE_TARGET} picks, signal weights will be recalibrated based on empirical hit rates.`;
+  return `Validation milestone: ${resolvedCount}/${REGRESSION_MILESTONE_TARGET} resolved picks logged. At ${REGRESSION_MILESTONE_TARGET}, the 2026-08-25 recalibration (25% model blend, 2/day cap) gets its first out-of-sample review.`;
 }
 
 function parseCSV(content) {
@@ -592,26 +592,52 @@ const RUNS_PER_EARNED_RUN = 1.08;    // unearned runs add ~8% on top of ERA
 const STARTER_INNINGS = 5.5;         // league-typical starter workload
 const BULLPEN_INNINGS = 3.5;
 const OPS_RUN_ELASTICITY = 2.0;      // +10% OPS vs league ≈ +20% runs scored
-const TOTAL_RUNS_SD_COEFF = 1.45;    // SD of game totals ≈ 1.45 * sqrt(mean) (≈4.3 at 8.7)
+const TOTAL_RUNS_SD_COEFF = 1.40;    // measured: SD of (actual - line) = 4.25 at mean total 9.3 (n=224, 2026-08-25 recalibration)
 
 // Kalshi's taker fee: ceil'd 7% of price*(1-price) per contract. Charged on
 // entry, so the true cost of a position is ask + fee.
 const KALSHI_FEE_RATE = 0.07;
 function kalshiFee(price) { return KALSHI_FEE_RATE * price * (1 - price); }
 
-// Minimum probability edge (our P minus fee-adjusted cost) per label.
-// EDGE_TARGET raised from 0.05 to match EDGE_PRIME_TARGET (2026-07-26): at
-// 62 resolved picks, the 5%+ TARGET tier was 16/35 (45.7%, -$39.88) while
-// the 8%+ PRIME TARGET tier was 14/25 (56.0%, +$67.40) — the lower bar was
-// net-negative. Rather than guess an intermediate value with zero data
-// behind it, this pauses the TARGET tier at the one threshold that's
-// actually evidenced to work, until the 200-pick recalibration can properly
-// re-derive it. TARGET effectively can't fire while these are equal (the
-// PRIME check runs first and catches everything >= this value) — left as a
-// separate constant, not removed, so it's a one-line revert.
-const EDGE_PRIME_TARGET = 0.08;
-const EDGE_TARGET = 0.08;
-const EDGE_CONSIDER = 0.02;
+// === 2026-08-25 recalibration (216 resolved picks, all matched to final
+// scores via the MLB API) — the numbers behind every constant below ===
+//
+// The raw model was overconfident by ~10 probability points: it claimed an
+// average 53.4% on picks that hit 43.1%. Every calibration bin showed
+// actual < claimed. Meanwhile regressing (actual - line) on (model - line)
+// gave slope 0.26 with SE 0.33 — the projection's per-game disagreement
+// with the market is statistically indistinguishable from noise. Claimed
+// edge size also had NO positive relationship with outcomes (8-10pt claimed
+// edges hit 61%, 17-30pt hit 35%): the biggest "edges" were the biggest
+// model errors, i.e. winner's curse from maxing over many noisy candidates.
+//
+// What survived: a small, consistent realized edge of ~+2-4 points over the
+// Kalshi ask across all cost buckets — the ask itself runs slightly soft on
+// these markets. A maximum-likelihood fit of
+//   p_true = w * p_model + (1 - w) * ask
+// on all 224 outcome-matched picks put w at 0.20-0.25 (log-loss 0.6711,
+// beating the ask-only baseline's 0.6733). The model earns 25% of the vote;
+// the market keeps the rest.
+const W_MODEL_BLEND = 0.25;
+
+// Minimum BLENDED edge (blended P minus fee-adjusted cost) per label. These
+// look small next to the old 8% bar, but they're honest: a 1.5pt blended
+// edge requires the raw model to disagree with the ask by ~13 points.
+// Retro-test at these settings: 45.0% hit rate at ~40c average cost
+// (break-even ≈ 42.7% incl. fees), +$96 on 60 picks vs the old rule's +$128
+// on 216 — same profit, 70% fewer picks, ~4x the per-pick EV. Raising the
+// threshold further (3pt+) went NEGATIVE in retro — winner's curse again —
+// so selectivity comes from the daily cap below, not a taller bar.
+const EDGE_PRIME_TARGET = 0.025;
+const EDGE_TARGET = 0.015;
+const EDGE_CONSIDER = 0.005;
+
+// Hard slate-level cap: only the top-N edges each day get logged as picks,
+// the rest demote to CONSIDER. Retro: cap 2 ≈ cap 3 on hit rate, and both
+// beat uncapped (45.0% vs 41.7%) — the marginal qualifying picks were the
+// weakest. Joey's standing requirement: a selective, high-conviction bot,
+// not 10 picks on a 15-game slate.
+const MAX_PICKS_PER_DAY = 2;
 
 // Standard normal CDF (Abramowitz–Stegun erf approximation, |err| < 1.5e-7).
 function normalCdf(z) {
@@ -708,60 +734,37 @@ function probOver(projection, strike) {
   return 1 - normalCdf((strike - projection.projectedTotal) / projection.sd);
 }
 
-// How far from the projected total a strike may sit and still be considered.
-// The normal model's tails are its least trustworthy region (real run
-// distributions are right-skewed), and Kalshi's far-tail books are thin with
-// wide spreads — un-constrained search reliably "finds" its biggest edges
-// exactly there (e.g. UNDER 2.5 at a 9% model probability), which are model
-// artifacts, not value. Same reason for the cost bounds: sub-10-cent and
-// 90-cent-plus contracts are longshot/lock territory where the model has no
-// standing to disagree with the market.
-const STRIKE_SEARCH_WINDOW = 2.0;
-const MIN_CONTRACT_COST = 0.10;
-const MAX_CONTRACT_COST = 0.90;
+// Strike search is anchored to the MARKET's center, not the projection
+// (recalibrated 2026-08-25). Anchoring to the projection let a hot model
+// wander 2 runs from consensus and max over ~8 noisy candidates — the
+// winner's-curse machine the audit caught. ±1.0 around the market center
+// gives 2-3 strikes x 2 sides where liquidity is best and the normal
+// approximation is most credible. Cost bounds tightened 0.10-0.90 →
+// 0.30-0.70: sub-30-cent longshots hit 30.0% in the data (10 picks) and are
+// where the skew/tail error concentrates.
+const STRIKE_SEARCH_WINDOW = 1.0;
+const MIN_CONTRACT_COST = 0.30;
+const MAX_CONTRACT_COST = 0.70;
 
 // When the model's projected total sits further than this from the market's
 // own implied center, the humble read is that the model is missing something
 // the market knows (roof status, humidor, late scratches), not that a
 // 20-point edge appeared out of nowhere — cap those at CONSIDER instead of
-// logging them as bets.
-const MODEL_DISAGREEMENT_CAP = 2.5;
+// logging them as bets. Tightened 2.5 → 1.5 (2026-08-25): picks born from
+// 1.0-1.5-run disagreements hit 35% in the audit; the regression says big
+// disagreement is model error, not insight.
+const MODEL_DISAGREEMENT_CAP = 1.5;
 
-// Evaluates Kalshi strikes near the projection on both sides and returns the
-// single best fee-adjusted edge, labeled by size. Searches beyond just the
-// strike nearest the book total — mispricing is at least as likely one
-// strike away from the consensus number — but stays inside the window where
-// the normal approximation and market liquidity are both credible.
+// Evaluates Kalshi strikes around the market center on both sides and
+// returns the single best fee-adjusted BLENDED edge, labeled by size. The
+// probability that gets priced is the recalibrated blend
+//   p = W_MODEL_BLEND * p_model + (1 - W_MODEL_BLEND) * ask
+// — see the constants block above for the fit behind it.
 function detectProbEdge(projection, kalshiStrikes) {
   if (!projection) return { label: 'NO MODEL', reason: 'Insufficient pitcher data to project this game.' };
   if (!kalshiStrikes || !kalshiStrikes.length) return { label: 'No Kalshi market', reason: 'No Kalshi market found — skipping edge scoring.' };
 
-  let best = null;
-  for (const s of kalshiStrikes) {
-    if (Math.abs(s.strike - projection.projectedTotal) > STRIKE_SEARCH_WINDOW) continue;
-    const pOver = probOver(projection, s.strike);
-    const candidates = [
-      { side: 'OVER', prob: pOver, cost: s.overCost },
-      { side: 'UNDER', prob: 1 - pOver, cost: s.underCost },
-    ];
-    for (const c of candidates) {
-      if (c.cost == null || c.cost < MIN_CONTRACT_COST || c.cost > MAX_CONTRACT_COST) continue;
-      const effectiveCost = c.cost + kalshiFee(c.cost);
-      const edge = c.prob - effectiveCost;
-      if (!best || edge > best.edge) {
-        best = { side: c.side, strike: s.strike, ticker: s.ticker, cost: c.cost, effectiveCost, ourProb: c.prob, edge };
-      }
-    }
-  }
-
-  if (!best) return { label: 'No Kalshi market', reason: 'No usable Kalshi pricing.' };
-
-  const pct = (x) => `${(x * 100).toFixed(1)}%`;
-  const detail = `model ${pct(best.ourProb)} vs cost ${pct(best.effectiveCost)} (incl. fee) on ${best.side} ${best.strike} — edge ${pct(best.edge)}`;
-
-  // Market's implied center: the strike priced closest to a coin flip. If the
-  // projection disagrees with that center by more than the cap, refuse to
-  // treat the gap as a bettable edge regardless of its size.
+  // Market's implied center: the strike priced closest to a coin flip.
   let marketCenter = null;
   let centerDist = Infinity;
   for (const s of kalshiStrikes) {
@@ -769,14 +772,40 @@ function detectProbEdge(projection, kalshiStrikes) {
     const d = Math.abs(s.overCost - 0.5);
     if (d < centerDist) { centerDist = d; marketCenter = s.strike; }
   }
-  if (marketCenter != null && Math.abs(projection.projectedTotal - marketCenter) > MODEL_DISAGREEMENT_CAP) {
+  if (marketCenter == null) return { label: 'No Kalshi market', reason: 'No usable Kalshi pricing.' };
+
+  let best = null;
+  for (const s of kalshiStrikes) {
+    if (Math.abs(s.strike - marketCenter) > STRIKE_SEARCH_WINDOW + 0.01) continue;
+    const pOverModel = probOver(projection, s.strike);
+    const candidates = [
+      { side: 'OVER', modelProb: pOverModel, cost: s.overCost },
+      { side: 'UNDER', modelProb: 1 - pOverModel, cost: s.underCost },
+    ];
+    for (const c of candidates) {
+      if (c.cost == null || c.cost < MIN_CONTRACT_COST || c.cost > MAX_CONTRACT_COST) continue;
+      const blendedProb = W_MODEL_BLEND * c.modelProb + (1 - W_MODEL_BLEND) * c.cost;
+      const effectiveCost = c.cost + kalshiFee(c.cost);
+      const edge = blendedProb - effectiveCost;
+      if (!best || edge > best.edge) {
+        best = { side: c.side, strike: s.strike, ticker: s.ticker, cost: c.cost, effectiveCost, ourProb: blendedProb, rawModelProb: c.modelProb, edge };
+      }
+    }
+  }
+
+  if (!best) return { label: 'No Kalshi market', reason: 'No usable Kalshi pricing inside the cost and strike guards.' };
+
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const detail = `raw model ${pct(best.rawModelProb)} → blended ${pct(best.ourProb)} vs cost ${pct(best.effectiveCost)} (incl. fee) on ${best.side} ${best.strike} — edge ${pct(best.edge)}`;
+
+  if (Math.abs(projection.projectedTotal - marketCenter) > MODEL_DISAGREEMENT_CAP) {
     return { ...best, label: 'CONSIDER', reason: `Model projects ${projection.projectedTotal.toFixed(1)} but the market centers near ${marketCenter} — disagreement too large to trust as an edge (${detail})` };
   }
 
-  if (best.edge >= EDGE_PRIME_TARGET) return { ...best, label: 'PRIME TARGET', reason: `Large probability edge: ${detail}` };
-  if (best.edge >= EDGE_TARGET) return { ...best, label: 'TARGET', reason: `Probability edge: ${detail}` };
-  if (best.edge >= EDGE_CONSIDER) return { ...best, label: 'CONSIDER', reason: `Marginal probability edge: ${detail}` };
-  return { ...best, label: 'PASS', reason: `No probability edge after fees: ${detail}` };
+  if (best.edge >= EDGE_PRIME_TARGET) return { ...best, label: 'PRIME TARGET', reason: `Large blended edge: ${detail}` };
+  if (best.edge >= EDGE_TARGET) return { ...best, label: 'TARGET', reason: `Blended edge: ${detail}` };
+  if (best.edge >= EDGE_CONSIDER) return { ...best, label: 'CONSIDER', reason: `Marginal blended edge: ${detail}` };
+  return { ...best, label: 'PASS', reason: `No blended edge after fees: ${detail}` };
 }
 
 function computeConfidence(weightedSignals) {
@@ -1729,7 +1758,7 @@ async function getTodayGames(opts = {}) {
   console.log(`============================\n`);
 
   const results = [];
-  let explainCount = 0;
+  const pendingPicks = [];
   let gamesWithOdds = 0;
   let gamesWithKalshi = 0;
 
@@ -1797,8 +1826,9 @@ async function getTodayGames(opts = {}) {
     const isOverLean = edge?.side ? edge.side === 'OVER' : OVER_LEANS.includes(analysis.lean);
 
     if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET')) {
-      // Log the bet we'd actually place: the chosen strike as the line, and
-      // juice derived from the fee-inclusive cost so recorded P&L nets fees.
+      // Don't log yet — qualifying edges across the whole slate compete for
+      // MAX_PICKS_PER_DAY slots after the loop. Stash everything logPick
+      // needs (and the explain payload) so the winners can be logged then.
       const chosen = (kalshi?.strikes || []).find(s => s.strike === edge.strike);
       const pickOdds = {
         total: edge.strike.toFixed(1),
@@ -1812,18 +1842,16 @@ async function getTodayGames(opts = {}) {
         || 'No single dominant signal — the call comes from the runs projection.';
       const marketFact = `Model projects ${projection.projectedTotal.toFixed(2)} runs — P(${edge.side} ${edge.strike}) = ${(edge.ourProb * 100).toFixed(1)}% vs market cost ${(edge.effectiveCost * 100).toFixed(1)}% including fees.`;
       const riskFact = riskFactorFact(analysis.weighted, isOverLean, stadiumNotes, isDome, analysis.confidence);
-      logPick(today, gameLabel, analysis.lean, analysis.confidence, edge.label, pickOdds,
-        { signalFact, marketFact, riskFact, signals: encodeSignals(analysis.weighted) },
-        { side: edge.side, modelTotal: projection.projectedTotal, modelProb: edge.ourProb, entryCost: edge.cost, ticker: edge.ticker });
+      pendingPicks.push({
+        edge, gameLabel,
+        logArgs: [today, gameLabel, analysis.lean, analysis.confidence, pickOdds,
+          { signalFact, marketFact, riskFact, signals: encodeSignals(analysis.weighted) },
+          { side: edge.side, modelTotal: projection.projectedTotal, modelProb: edge.ourProb, entryCost: edge.cost, ticker: edge.ticker }],
+        explainPayload: explain ? { away, home, venue, awayPitcher, homePitcher, awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, weather, stadiumNotes, odds, kalshi, analysis, edge } : null,
+      });
     }
 
-    if (explain) {
-      if (edge && (edge.label === 'TARGET' || edge.label === 'PRIME TARGET')) {
-        printExplain({ away, home, venue, awayPitcher, homePitcher, awayStats, homeStats, awayBullpen, homeBullpen, awayHitters, homeHitters, weather, stadiumNotes, odds, kalshi, analysis, edge });
-        explainCount++;
-      }
-      continue;
-    }
+    if (explain) continue;
 
     const pf = stadiumNotes?.parkFactor;
     const line1 = `${gameLabel} | ${venue} | Park Factor: ${pf != null ? pf.toFixed(2) : 'N/A'}`;
@@ -1892,8 +1920,32 @@ async function getTodayGames(opts = {}) {
     kalshiAuthOk: verifyKalshiAuth(),
   });
 
+  // Slate-level selectivity: qualifying edges compete for MAX_PICKS_PER_DAY
+  // slots; everything below the cutoff demotes to CONSIDER. Retro-tested
+  // better than taking every qualifier (see MAX_PICKS_PER_DAY comment), and
+  // it directly answers the recurring "too many picks" problem — the cap
+  // binds no matter how generous the edge detector is feeling today.
+  pendingPicks.sort((a, b) => b.edge.edge - a.edge.edge);
+  const cappedOut = pendingPicks.slice(MAX_PICKS_PER_DAY);
+  for (const p of cappedOut) {
+    p.edge.label = 'CONSIDER';
+    p.edge.reason = `Real but below today's top-${MAX_PICKS_PER_DAY} edge cutoff — capped for selectivity. ${p.edge.reason}`;
+  }
+  const chosenPicks = pendingPicks.slice(0, MAX_PICKS_PER_DAY);
+  if (cappedOut.length) {
+    console.log(`Daily cap: kept top ${chosenPicks.length} of ${pendingPicks.length} qualifying edges — ${cappedOut.map(p => p.gameLabel).join(', ')} demoted to CONSIDER.\n`);
+  }
+
+  // Log the winners (in explain mode too — matches the old behavior, where
+  // logPick ran before the explain branch; logPick dedupes on Date+Game).
+  for (const p of chosenPicks) {
+    const a = p.logArgs;
+    logPick(a[0], a[1], a[2], a[3], p.edge.label, a[4], a[5], a[6]);
+  }
+
   if (explain) {
-    if (explainCount === 0) console.log('No TARGET or PRIME TARGET calls today.\n');
+    if (chosenPicks.length === 0) console.log('No TARGET or PRIME TARGET calls today.\n');
+    for (const p of chosenPicks) printExplain(p.explainPayload);
     console.log(`============================\n`);
     return;
   }

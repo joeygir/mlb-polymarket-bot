@@ -46,11 +46,11 @@ function getBotHealthStatus() {
   return { available: true, ...status, warnings };
 }
 
-const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Every TARGET and PRIME TARGET pick is being logged to picks_log.csv for statistical regression analysis at 200 resolved picks. Do not optimize for pick volume. Only log picks where edge detection is confident. The goal is clean, validated data — not picks.';
-const REGRESSION_MILESTONE_TARGET = 200;
+const PAPER_TRADING_NOTICE = 'PAPER TRADING MODE — Accuracy tracking is the #1 priority. Recalibrated 2026-08-25 at 216 resolved picks: model probability now blended 25/75 with the Kalshi ask, max 2 picks/day, tightened cost and disagreement guards. The goal is validating the new formula live — not pick volume.';
+const REGRESSION_MILESTONE_TARGET = 350;
 
 function regressionMilestoneLine(resolvedCount) {
-  return `Regression milestone: ${resolvedCount}/${REGRESSION_MILESTONE_TARGET} resolved picks logged. At ${REGRESSION_MILESTONE_TARGET} picks, signal weights will be recalibrated based on empirical hit rates.`;
+  return `Validation milestone: ${resolvedCount}/${REGRESSION_MILESTONE_TARGET} resolved picks logged. At ${REGRESSION_MILESTONE_TARGET}, the 2026-08-25 recalibration (25% model blend, 2/day cap) gets its first out-of-sample review.`;
 }
 
 function getResolvedPicksCount() {
